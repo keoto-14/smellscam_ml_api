@@ -10,3 +10,4 @@ tldextract==5.1.2
 dnspython==2.6.1
 beautifulsoup4==4.12.3
 python-whois==0.9.3
+xgboost==2.1.1
