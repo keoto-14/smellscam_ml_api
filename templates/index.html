@@ -1,17 +1,171 @@
-<section class="hero-section">
-    <div class="card">
-      <div class="card-header">
-        <h3 class="card-title">🔍 Scan a Shopping Link</h3>
-      </div>
-      <div class="card-body">
-        <p class="card-text">
-          Enter a shopping website shop link below to check its trust score.
-        </p>
-        <form method="post" action="result.php">
-          <input type="text" name="shopping_url" placeholder="https://example.com" required
-                 style="width:100%; padding:12px; margin-bottom:16px; border:1px solid #ccc; border-radius:8px;">
-          <button type="submit" class="card-btn">Check Trust Score</button>
-        </form>
-      </div>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SmellScam — URL Scam Detection</title>
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600&display=swap" rel="stylesheet">
+  <style>
+    body {
+      font-family: 'Poppins', sans-serif;
+      background: linear-gradient(135deg, #1e293b, #0f172a);
+      color: white;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+    }
+
+    .container {
+      width: 90%;
+      max-width: 500px;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 16px;
+      padding: 2rem;
+      box-shadow: 0 8px 20px rgba(0,0,0,0.3);
+      text-align: center;
+    }
+
+    h1 {
+      margin-bottom: 1rem;
+      font-size: 1.8rem;
+    }
+
+    input {
+      width: 100%;
+      padding: 0.8rem;
+      border: none;
+      border-radius: 8px;
+      font-size: 1rem;
+      outline: none;
+      margin-bottom: 1rem;
+    }
+
+    button {
+      background: #06b6d4;
+      color: white;
+      border: none;
+      padding: 0.8rem 1.2rem;
+      border-radius: 8px;
+      font-size: 1rem;
+      cursor: pointer;
+      transition: background 0.3s;
+    }
+
+    button:hover {
+      background: #0891b2;
+    }
+
+    .result {
+      margin-top: 1.5rem;
+      padding: 1rem;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.1);
+      display: none;
+    }
+
+    .label {
+      font-size: 1.2rem;
+      font-weight: 600;
+    }
+
+    .trust {
+      font-size: 2rem;
+      margin-top: 0.5rem;
+    }
+
+    .details {
+      text-align: left;
+      margin-top: 1rem;
+      font-size: 0.9rem;
+    }
+
+    .loading {
+      margin-top: 1rem;
+      font-style: italic;
+      color: #ccc;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🔍 SmellScam</h1>
+    <p>Enter a URL to check if it's phishing or safe.</p>
+    <input type="text" id="urlInput" placeholder="https://example.com">
+    <button onclick="analyzeUrl()">Check URL</button>
+
+    <p class="loading" id="loading" style="display:none;">Analyzing...</p>
+
+    <div class="result" id="resultBox">
+      <div class="label" id="labelText"></div>
+      <div class="trust" id="trustScore"></div>
+      <div class="details" id="details"></div>
     </div>
-</section>
+  </div>
+
+  <script>
+    const API_URL = "https://smellscammlapi-production.up.railway.app/api/predict";
+
+    async function analyzeUrl() {
+      const urlInput = document.getElementById("urlInput").value.trim();
+      const loading = document.getElementById("loading");
+      const resultBox = document.getElementById("resultBox");
+
+      if (!urlInput) {
+        alert("Please enter a URL first!");
+        return;
+      }
+
+      loading.style.display = "block";
+      resultBox.style.display = "none";
+
+      try {
+        const response = await fetch(API_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: urlInput })
+        });
+
+        const data = await response.json();
+        loading.style.display = "none";
+        resultBox.style.display = "block";
+
+        if (data.error) {
+          document.getElementById("labelText").innerText = "⚠️ Error: " + data.error;
+          document.getElementById("trustScore").innerText = "";
+          document.getElementById("details").innerText = "";
+          return;
+        }
+
+        // Color logic based on trust
+        let color = data.prediction === "PHISHING" ? "#ef4444" :
+                    data.prediction === "SUSPICIOUS" ? "#f59e0b" :
+                    "#22c55e";
+
+        document.getElementById("labelText").innerHTML =
+          `Result: <span style="color:${color}">${data.prediction}</span>`;
+
+        document.getElementById("trustScore").innerText =
+          `Trust Score: ${data.trust_score}%`;
+
+        const det = data.details;
+        const detailHTML = `
+          <b>RF Prob:</b> ${det.rf_prob?.toFixed(3)}<br>
+          <b>NB Prob:</b> ${det.nb_prob?.toFixed(3)}<br>
+          <b>XGB Prob:</b> ${det.xgb_prob !== null ? det.xgb_prob.toFixed(3) : "N/A"}<br>
+          <b>SSL Valid:</b> ${det.ssl_valid ? "✅" : "❌"}<br>
+          <b>Quad9 Blocked:</b> ${det.quad9_blocked ? "🚫" : "✅"}<br>
+          <b>Domain Age:</b> ${det.domain_age_days} days<br>
+          <b>VT Detection:</b> ${det.vt_malicious}
+        `;
+        document.getElementById("details").innerHTML = detailHTML;
+      } catch (err) {
+        loading.style.display = "none";
+        alert("Error connecting to the API. Please try again.");
+      }
+    }
+  </script>
+</body>
+</html>
