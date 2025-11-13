@@ -1,12 +1,12 @@
+import os, sys
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 import os
 import joblib
 import numpy as np
 import pandas as pd
 from flask import Flask, render_template, request, jsonify
 from url_feature_extractor import extract_all_features
-
-import os, sys
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 
 # Initialize Flask app
