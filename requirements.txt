@@ -1,12 +1,21 @@
-Flask
-joblib
-numpy
-pandas
-requests
-tldextract
-dnspython
-beautifulsoup4
-python-whois
-gunicorn
-xgboost
-scikit-learn
+# Core web framework
+Flask==3.0.3
+gunicorn==23.0.0
+
+# Data science + ML stack
+numpy==1.26.4
+pandas==2.2.2
+scikit-learn==1.4.2
+xgboost==2.0.3
+joblib==1.4.2
+
+# URL feature extraction
+tldextract==5.1.2
+beautifulsoup4==4.12.3
+requests==2.32.3
+dnspython==2.6.1
+python-whois==0.9.4
+
+# Other essentials
+idna==3.7
+urllib3==2.2.2
