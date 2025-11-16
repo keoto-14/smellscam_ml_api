@@ -1,11 +1,11 @@
 fastapi
 uvicorn
-aiohttp
-pandas
 numpy
+pandas
 scikit-learn
-xgboost==1.7.2
-tldextract
-python-multipart
+xgboost
 requests
 python-dotenv
+beautifulsoup4
+python-whois
+dnspython
