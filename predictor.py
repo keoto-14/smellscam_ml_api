@@ -153,8 +153,8 @@ def predict_from_features(features, models, raw_url=None):
     # HYBRID FINAL SCORE
     # ----------------------
     final_risk = (
-        0.50 * ml_risk +
-        0.30 * vt_risk +
+        0.45 * ml_risk +
+        0.35 * vt_risk +
         0.20 * gsb_risk
     )
 
