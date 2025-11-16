@@ -17,13 +17,13 @@ app = FastAPI(
 # Enable CORS (you can restrict later)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],          # update later for security
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Load ML + hybrid models
+# Load models on startup
 models = load_models()
 
 class URLRequest(BaseModel):
@@ -43,10 +43,10 @@ async def predict(req: URLRequest):
     try:
         url = req.url.strip()
 
-        # Extract features
+        # Extract full feature set
         features = extract_all_features(url)
 
-        # Run hybrid predictor — IMPORTANT: pass raw_url=url
+        # Hybrid prediction (ML + VT + GSB)
         result = predict_from_features(features, models, raw_url=url)
 
         return result
@@ -64,10 +64,7 @@ async def simple(url: str):
     try:
         clean = url.strip().replace("\n", "").replace("\r", "")
 
-        # Extract features
         features = extract_all_features(clean)
-
-        # Run hybrid predictor
         result = predict_from_features(features, models, raw_url=clean)
 
         return result
@@ -75,3 +72,40 @@ async def simple(url: str):
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ------------------------------------------------------------
+# 3) DEBUG ENDPOINT (GET /debug?url=https://...)
+# ------------------------------------------------------------
+@app.get("/debug")
+async def debug(url: str):
+    """
+    Debug endpoint: returns ALL extracted features,
+    ML model probabilities, VT/GSB results,
+    hybrid output, final trust/risk score.
+    """
+    try:
+        clean = url.strip()
+
+        # Extract full 40+ features
+        features = extract_all_features(clean)
+
+        # Run hybrid prediction
+        result = predict_from_features(features, models, raw_url=clean)
+
+        # Debug output
+        return {
+            "url": clean,
+            "features_extracted": features,
+            "prediction": result.get("prediction"),
+            "trust_score": result.get("trust_score"),
+            "risk_score": result.get("risk_score"),
+            "vt": result.get("vt"),
+            "gsb_match": result.get("gsb_match"),
+            "model_probs": result.get("model_probs"),
+            "hybrid_output": result
+        }
+
+    except Exception as e:
+        traceback.print_exc()
+        return {"error": str(e)}
