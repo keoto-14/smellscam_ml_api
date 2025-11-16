@@ -1,4 +1,5 @@
-# predictor.py  (HYBRID VERSION)
+# predictor.py  (Hybrid scoring: GSB=20%, VT=30%, ML=50%)
+
 import os
 import pickle
 import numpy as np
@@ -10,6 +11,9 @@ import pandas as pd
 MODEL_DIR = "models"
 
 
+# -------------------------
+# Model loaders
+# -------------------------
 def load_pickle(path):
     with open(path, "rb") as f:
         return pickle.load(f)
@@ -37,17 +41,17 @@ def load_models():
     return models
 
 
-# ----------------------
-# Google Safe Browsing
-# ----------------------
+# -------------------------
+# Google Safe Browsing API
+# -------------------------
 GSB_API_KEY = os.environ.get("GSB_API_KEY")
 
 def check_gsb(url):
+    """Returns True if URL is flagged by GSB"""
     if not GSB_API_KEY:
         return False
 
     endpoint = f"https://safebrowsing.googleapis.com/v4/threatMatches:find?key={GSB_API_KEY}"
-
     body = {
         "client": {"clientId": "smellscam", "clientVersion": "1.0"},
         "threatInfo": {
@@ -73,30 +77,31 @@ def check_gsb(url):
     return False
 
 
-# ----------------------
-# Prediction (Hybrid)
-# ----------------------
+# -------------------------
+# Hybrid Prediction Function
+# -------------------------
 def predict_from_features(features, models, raw_url=None):
     FEATURES = models["features"]
 
+    # Convert dict to ML input
     X = pd.DataFrame([features])
     for col in FEATURES:
         if col not in X.columns:
             X[col] = 0
     X = X[FEATURES].fillna(0)
 
-    # ML-only level
+    # ML Model Predictions
     p_xgb = float(models["xgb"].predict_proba(X)[0][1])
     p_rf  = float(models["rf"].predict_proba(X)[0][1])
 
     stack_in = pd.DataFrame([{"xgb": p_xgb, "rf": p_rf}])
     final_ml_prob = float(models["stacker"].predict_proba(stack_in)[0][1])
 
-    ml_risk = final_ml_prob * 100.0
+    ml_risk = final_ml_prob * 100.0  # ML risk %
 
-    # VirusTotal (already included in extractor)
+    # VirusTotal values (already included in extractor)
     vt_total = features.get("vt_total_vendors", 0)
-    vt_mal  = features.get("vt_malicious_count", 0)
+    vt_mal = features.get("vt_malicious_count", 0)
     vt_ratio = features.get("vt_detection_ratio", 0.0)
     vt_risk = vt_ratio * 100.0
 
@@ -104,19 +109,28 @@ def predict_from_features(features, models, raw_url=None):
     gsb_match = check_gsb(raw_url)
     gsb_risk = 100.0 if gsb_match else 0.0
 
-    # Hybrid scoring
+    # ------------------------------------------------------
+    # FINAL HYBRID RISK = 20% GSB + 30% VT + 50% ML
+    # ------------------------------------------------------
     final_risk = (
-        0.50 * gsb_risk +
+        0.20 * gsb_risk +
         0.30 * vt_risk +
-        0.20 * ml_risk
+        0.50 * ml_risk
     )
 
-    final_risk = max(0, min(100, final_risk))
-    trust_score = 100 - final_risk
+    # Clamp 0–100
+    final_risk = max(0.0, min(100.0, final_risk))
 
-    prediction = "phishing" if final_risk >= 50 else "safe"
+    # TRUST SCORE = safety %
+    trust_score = 100.0 - final_risk
+
+    # Final prediction rule
     if gsb_match:
         prediction = "phishing"
+    elif final_risk >= 50:
+        prediction = "phishing"
+    else:
+        prediction = "safe"
 
     return {
         "prediction": prediction,
