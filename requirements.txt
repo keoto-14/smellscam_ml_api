@@ -1,11 +1,12 @@
 fastapi
 uvicorn
-numpy
-pandas
-scikit-learn
-xgboost
 requests
 python-dotenv
 beautifulsoup4
-python-whois
+tldextract
+whois
 dnspython
+xgboost
+scikit-learn
+pandas
+numpy
