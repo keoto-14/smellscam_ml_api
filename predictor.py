@@ -12,7 +12,7 @@ def load_pickle(path):
 
 def load_xgb_model(path):
     model = XGBClassifier()
-    model.load_model(path)   # Load JSON version
+    model.load_model(path)   # Load XGB in JSON format
     return model
 
 def load_models():
@@ -26,7 +26,7 @@ def load_models():
     }
 
     print("XGB MODEL TYPE =", type(models["xgb"]))
-    print("✅ All models loaded with NO LightGBM!")
+    print("✅ All models loaded! (NO LightGBM)")
     return models
 
 
@@ -36,7 +36,7 @@ def predict_from_features(features, models):
     # Convert feature dict → DataFrame
     X = pd.DataFrame([features])
 
-    # Ensure missing feature columns exist
+    # Ensure all required feature columns exist
     for col in FEATURES:
         if col not in X.columns:
             X[col] = 0
@@ -47,7 +47,7 @@ def predict_from_features(features, models):
     p_xgb = models["xgb"].predict_proba(X)[:, 1][0]
     p_rf  = models["rf"].predict_proba(X)[:, 1][0]
 
-    # Stacker input (only 2 features now)
+    # Stacker input (only XGB + RF)
     stack_input = pd.DataFrame([{
         "xgb": p_xgb,
         "rf":  p_rf,
