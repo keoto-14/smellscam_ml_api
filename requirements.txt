@@ -5,6 +5,5 @@ pandas
 numpy
 scikit-learn
 xgboost==1.7.2
-lightgbm
 tldextract
 python-multipart
