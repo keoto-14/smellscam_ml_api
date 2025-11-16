@@ -1,0 +1,86 @@
+# ------------------------------
+# Python general ignores
+# ------------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pdb
+*.pkl
+*.pickle
+*.joblib
+*.cache/
+*.log
+*.tmp
+
+# Virtual environment
+env/
+venv/
+ENV/
+.venv/
+
+# Jupyter & IPython
+.ipynb_checkpoints/
+*.ipynb
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Byte-compiled files
+*.so
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# ------------------------------
+# ML Models — we keep them but ignore extra large versions
+# ------------------------------
+# allow compressed models like xgb.json and rf.pkl
+# but ignore accidental huge checkpoints
+models/*.bin
+models/*.model
+models/*.txt
+models/*.h5
+models/*.onnx
+models/*.pt
+models/*.ckpt
+
+# ------------------------------
+# Environment variables
+# ------------------------------
+.env
+.env.*
+*.env
+.vscode/settings.json
+
+# ------------------------------
+# Cache & temp files
+# ------------------------------
+.cache/
+tmp/
+temp/
+logs/
+*.sqlite3
+
+# ------------------------------
+# Node (if frontend accidentally added)
+# ------------------------------
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# ------------------------------
+# IDE / Editor settings
+# ------------------------------
+.vscode/
+.idea/
+*.iml
+*.code-workspace
+
+# ------------------------------
+# Railway build artifacts
+# ------------------------------
+railway/
