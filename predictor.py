@@ -12,43 +12,43 @@ def load_pickle(path):
 
 def load_xgb_model(path):
     model = XGBClassifier()
-    model.load_model(path)   # <── THE CORRECT WAY
+    model.load_model(path)   # Load JSON version
     return model
 
 def load_models():
     print("📦 Loading ML models...")
 
     models = {
-        "lgbm": load_pickle(os.path.join(MODEL_DIR, "lgbm.pkl")),
-        "xgb":  load_xgb_model(os.path.join(MODEL_DIR, "xgb.json")),   # <── FIXED
-        "rf":   load_pickle(os.path.join(MODEL_DIR, "rf.pkl")),
+        "xgb": load_xgb_model(os.path.join(MODEL_DIR, "xgb.json")),
+        "rf": load_pickle(os.path.join(MODEL_DIR, "rf.pkl")),
         "stacker": load_pickle(os.path.join(MODEL_DIR, "stacker.pkl")),
         "features": load_pickle(os.path.join(MODEL_DIR, "features.pkl")),
     }
 
     print("XGB MODEL TYPE =", type(models["xgb"]))
-    print("✅ All models loaded!")
+    print("✅ All models loaded with NO LightGBM!")
     return models
+
 
 def predict_from_features(features, models):
     FEATURES = models["features"]
 
+    # Convert feature dict → DataFrame
     X = pd.DataFrame([features])
 
-    # ensure all required feature columns exist
+    # Ensure missing feature columns exist
     for col in FEATURES:
         if col not in X.columns:
             X[col] = 0
 
     X = X[FEATURES].fillna(0)
 
-    # Predict probabilities
-    p_lgb = models["lgbm"].predict_proba(X)[:, 1][0]
+    # Base model predictions
     p_xgb = models["xgb"].predict_proba(X)[:, 1][0]
     p_rf  = models["rf"].predict_proba(X)[:, 1][0]
 
+    # Stacker input (only 2 features now)
     stack_input = pd.DataFrame([{
-        "lgb": p_lgb,
         "xgb": p_xgb,
         "rf":  p_rf,
     }])
@@ -61,8 +61,7 @@ def predict_from_features(features, models):
         "prediction": label,
         "risk_score": round(final_proba * 100, 2),
         "model_probs": {
-            "lgbm": p_lgb,
-            "xgb": p_xgb,
-            "rf": p_rf
+            "xgb": float(p_xgb),
+            "rf": float(p_rf),
         }
     }
