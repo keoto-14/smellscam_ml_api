@@ -1,18 +1,16 @@
-# predictor.py  (FINAL HYBRID VERSION)
+# predictor.py
 import os
 import pickle
 import numpy as np
 import pandas as pd
-import traceback
-import requests
 from xgboost import XGBClassifier
 from simple_cache import cache_get, cache_set
+import traceback
+import urllib.parse
+import re
 
 MODEL_DIR = "models"
 
-# -----------------------------------------------------
-# Model Loaders
-# -----------------------------------------------------
 def load_pickle(path):
     with open(path, "rb") as f:
         return pickle.load(f)
@@ -24,31 +22,30 @@ def load_xgb_model(path):
 
 def load_models():
     print("📦 Loading ML models...")
-
     models = {
         "xgb": load_xgb_model(os.path.join(MODEL_DIR, "xgb.json")),
         "rf": load_pickle(os.path.join(MODEL_DIR, "rf.pkl")),
         "stacker": load_pickle(os.path.join(MODEL_DIR, "stacker.pkl")),
         "features": load_pickle(os.path.join(MODEL_DIR, "features.pkl")),
     }
-
     print("XGB MODEL:", type(models["xgb"]))
     print("Stacker inputs:", models["stacker"].coef_.shape[1])
     print("Models loaded successfully!")
     return models
 
-# -----------------------------------------------------
-# Google Safe Browsing (optional, low weight)
-# -----------------------------------------------------
-GSB_API_KEY = os.getenv("GSB_API_KEY")
+
+###############################################
+# GOOGLE SAFE BROWSING
+###############################################
+import requests
+GSB_API_KEY = os.environ.get("GSB_API_KEY")
 
 def check_gsb(url):
-    """Google Safe Browsing check with caching."""
-    if not GSB_API_KEY or not url:
+    if not GSB_API_KEY:
         return False
-
+    
     cache_key = f"gsb::{url}"
-    cached = cache_get(cache_key, max_age=3600)
+    cached = cache_get(cache_key)
     if cached is not None:
         return cached
 
@@ -56,120 +53,156 @@ def check_gsb(url):
     body = {
         "client": {"clientId": "smellscam", "clientVersion": "1.0"},
         "threatInfo": {
-            "threatTypes": [
-                "MALWARE","SOCIAL_ENGINEERING",
-                "UNWANTED_SOFTWARE","POTENTIALLY_HARMFUL_APPLICATION"
-            ],
+            "threatTypes": ["MALWARE","SOCIAL_ENGINEERING","UNWANTED_SOFTWARE"],
             "platformTypes": ["ANY_PLATFORM"],
             "threatEntryTypes": ["URL"],
-            "threatEntries": [{"url": url}],
-        },
+            "threatEntries": [{"url": url}]
+        }
     }
 
     try:
         r = requests.post(endpoint, json=body, timeout=5)
-        if r.status_code == 200:
-            match = bool(r.json().get("matches"))
-            cache_set(cache_key, match)
-            return match
-    except Exception:
-        traceback.print_exc()
+        result = bool(r.json().get("matches"))
+        cache_set(cache_key, result)
+        return result
+    except:
+        return False
 
-    cache_set(cache_key, False)
+
+###############################################
+# VIRUSTOTAL DOMAIN CHECK (STRONGER WEIGHT)
+###############################################
+VT_API_KEY = os.environ.get("VT_API_KEY")
+
+def vt_domain_report(domain):
+    if not VT_API_KEY:
+        return 0, 0, 0.0
+
+    cache_key = f"vt::{domain}"
+    cached = cache_get(cache_key)
+    if cached:
+        return cached["total"], cached["mal"], cached["ratio"]
+
+    try:
+        headers = {"x-apikey": VT_API_KEY}
+        url = f"https://www.virustotal.com/api/v3/domains/{domain}"
+        r = requests.get(url, headers=headers, timeout=6)
+        stats = r.json().get("data", {}).get("attributes", {}).get("last_analysis_stats", {})
+        
+        total = sum(stats.values()) if stats else 0
+        mal = stats.get("malicious", 0) if stats else 0
+        ratio = mal / total if total > 0 else 0
+        cache_set(cache_key, {"total": total, "mal": mal, "ratio": ratio})
+
+        return total, mal, ratio
+
+    except:
+        return 0, 0, 0.0
+
+
+###############################################
+# EXTRA RULES (High accuracy)
+###############################################
+SUSPICIOUS_TLDS = {".asia", ".top", ".icu", ".shop", ".online", ".xyz", ".store"}
+BRAND_LIST = ["nike", "adidas", "asics", "apple", "samsung", "puma", "uniqlo", "dhl", "fedex"]
+
+def detect_brand_impersonation(domain):
+    root = domain.split(".")[-2]
+    for brand in BRAND_LIST:
+        if brand in domain and not domain.endswith(brand + ".com"):
+            return True
     return False
 
+def detect_redirect_scam(url):
+    return int("utm_" in url.lower() or "fbclid" in url.lower())
 
-# -----------------------------------------------------
-# FINAL HYBRID PREDICTION LOGIC
-# -----------------------------------------------------
+
+###############################################
+# MAIN PREDICTOR
+###############################################
 def predict_from_features(features, models, raw_url=None):
-    """Machine Learning + VirusTotal + (optional) Safe Browsing hybrid"""
-
     feature_names = models["features"]
+    X = np.array([[features.get(f, 0) for f in feature_names]], dtype=float)
 
-    # Build DataFrame with exact ML model feature list
-    X_df = pd.DataFrame([features])
-    for col in feature_names:
-        if col not in X_df.columns:
-            X_df[col] = 0
-    X_df = X_df[feature_names].apply(pd.to_numeric, errors="coerce").fillna(0)
-
-    # --------------------------
     # ML Predictions
-    # --------------------------
     try:
-        p_xgb = float(models["xgb"].predict_proba(X_df)[0][1])
-    except Exception:
-        traceback.print_exc()
+        p_xgb = float(models["xgb"].predict_proba(X)[0][1])
+    except:
         p_xgb = 0.5
-
     try:
-        p_rf = float(models["rf"].predict_proba(X_df)[0][1])
-    except Exception:
-        traceback.print_exc()
+        p_rf = float(models["rf"].predict_proba(X)[0][1])
+    except:
         p_rf = 0.5
 
-    stack_df = pd.DataFrame([{"xgb": p_xgb, "rf": p_rf}])
-
+    stack_input = np.array([[p_xgb, p_rf]])
     try:
-        ml_final_prob = float(models["stacker"].predict_proba(stack_df)[0][1])
-    except Exception:
-        ml_final_prob = (p_xgb + p_rf) / 2
+        final_ml = float(models["stacker"].predict_proba(stack_input)[0][1])
+    except:
+        final_ml = (p_xgb + p_rf) / 2
 
-    ml_risk = ml_final_prob * 100
+    ml_risk = final_ml * 100
 
-    # CLAMP ML RISK (ML tends to output too high)
-    ml_risk_clamped = min(ml_risk, 60)
 
-    # --------------------------
-    # VIRUSTOTAL (From extractor)
-    # --------------------------
-    vt_ratio = float(features.get("vt_detection_ratio", 0.0))
-    vt_total = int(features.get("vt_total_vendors", 0))
-    vt_mal = int(features.get("vt_malicious_count", 0))
+    ########################################
+    # VIRUSTOTAL RISK (STRONGER)
+    ########################################
+    parsed = urllib.parse.urlparse(raw_url or "")
+    domain = parsed.netloc.lower().split(":")[0]
 
-    # Boost VT signal (default VT ratio is too weak)
-    vt_risk = vt_ratio * 150    # <— THIS IS THE MAGIC BOOST
+    vt_total, vt_mal, vt_ratio = vt_domain_report(domain)
 
-    # --------------------------
-    # GOOGLE SAFE BROWSING (optional)
-    # --------------------------
+    # Quadratic scaling (much stronger detection)
+    vt_risk = ((vt_ratio * 100) ** 2) / 100  
+    vt_risk = min(vt_risk, 100)
+
+
+    ########################################
+    # GOOGLE SAFE BROWSING → Hard flag
+    ########################################
     gsb_match = check_gsb(raw_url)
-    gsb_risk = 100.0 if gsb_match else 0.0
+    gsb_risk = 100 if gsb_match else 0
 
-    # --------------------------
-    # FINAL HYBRID RISK SCORE
-    # --------------------------
+
+    ########################################
+    # EXTRA RULES BOOST
+    ########################################
+    rule_risk = 0
+
+    # suspicious TLD
+    for tld in SUSPICIOUS_TLDS:
+        if domain.endswith(tld):
+            rule_risk += 15
+
+    # brand impersonation
+    if detect_brand_impersonation(domain):
+        rule_risk += 25
+
+    # redirect scam
+    if detect_redirect_scam(raw_url):
+        rule_risk += 10
+
+
+    ########################################
+    # FINAL WEIGHTS
+    ########################################
     FINAL_RISK = (
-        0.35 * ml_risk_clamped +   # ML = 20%
-        0.60 * vt_risk +           # VT = 70%
-        0.05 * gsb_risk            # GSB = 10%
+        ml_risk * 0.50 +
+        vt_risk * 0.45 +
+        gsb_risk * 0.05 +
+        rule_risk
     )
 
     FINAL_RISK = max(0, min(FINAL_RISK, 100))
-    TRUST = 100 - FINAL_RISK
+    trust = 100 - FINAL_RISK
 
-    # --------------------------
-    # FINAL PREDICTION DECISION
-    # --------------------------
-    if gsb_match:
-        prediction = "phishing"
-    else:
-        prediction = "phishing" if FINAL_RISK >= 50 else "safe"
+    prediction = "phishing" if FINAL_RISK >= 50 else "safe"
 
     return {
         "prediction": prediction,
-        "trust_score": round(TRUST, 6),
-        "risk_score": round(FINAL_RISK, 6),
+        "trust_score": round(trust, 3),
+        "risk_score": round(FINAL_RISK, 3),
         "gsb_match": bool(gsb_match),
-        "vt": {
-            "total_vendors": vt_total,
-            "malicious": vt_mal,
-            "ratio": vt_ratio
-        },
-        "model_probs": {
-            "xgb": p_xgb,
-            "rf": p_rf,
-            "ml_final_prob": ml_final_prob
-        }
+        "vt": {"total_vendors": vt_total, "malicious": vt_mal, "ratio": vt_ratio},
+        "model_probs": {"xgb": p_xgb, "rf": p_rf, "ml_final": final_ml},
+        "rule_risk": rule_risk
     }
