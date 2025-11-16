@@ -14,16 +14,16 @@ app = FastAPI(
     version="1.0"
 )
 
-# Enable CORS so smellscam.com frontend can call API
+# Enable CORS (you can restrict later)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # later restrict: ["https://smellscam.com"]
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Load ML models
+# Load ML + hybrid models
 models = load_models()
 
 class URLRequest(BaseModel):
@@ -43,8 +43,11 @@ async def predict(req: URLRequest):
     try:
         url = req.url.strip()
 
+        # Extract features
         features = extract_all_features(url)
-        result = predict_from_features(features, models)
+
+        # Run hybrid predictor — IMPORTANT: pass raw_url=url
+        result = predict_from_features(features, models, raw_url=url)
 
         return result
 
@@ -54,15 +57,18 @@ async def predict(req: URLRequest):
 
 
 # ------------------------------------------------------------
-# 2) RAW STRING ENDPOINT (POST text/plain) — for frontend
+# 2) RAW STRING ENDPOINT (POST text/plain)
 # ------------------------------------------------------------
 @app.post("/simple")
 async def simple(url: str):
     try:
         clean = url.strip().replace("\n", "").replace("\r", "")
 
+        # Extract features
         features = extract_all_features(clean)
-        result = predict_from_features(features, models)
+
+        # Run hybrid predictor
+        result = predict_from_features(features, models, raw_url=clean)
 
         return result
 
