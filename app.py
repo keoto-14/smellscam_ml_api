@@ -17,7 +17,7 @@ app = FastAPI(
 # Enable CORS so smellscam.com frontend can call API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # later replace with ["https://smellscam.com"]
+    allow_origins=["*"],  # later restrict: ["https://smellscam.com"]
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -29,12 +29,14 @@ models = load_models()
 class URLRequest(BaseModel):
     url: str
 
+
 @app.get("/")
 async def root():
     return {"message": "SmellScam ML API is running!"}
 
+
 # ------------------------------------------------------------
-# JSON INPUT ENDPOINT  (POST { "url": "..." })
+# 1) JSON INPUT ENDPOINT  (POST { "url": "https://..." })
 # ------------------------------------------------------------
 @app.post("/predict")
 async def predict(req: URLRequest):
@@ -50,8 +52,9 @@ async def predict(req: URLRequest):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
+
 # ------------------------------------------------------------
-# RAW URL ENDPOINT (POST text/plain)
+# 2) RAW STRING ENDPOINT (POST text/plain) — for frontend
 # ------------------------------------------------------------
 @app.post("/simple")
 async def simple(url: str):
