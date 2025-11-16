@@ -12,7 +12,7 @@ def load_pickle(path):
 
 def load_xgb_model(path):
     model = XGBClassifier()
-    model.load_model(path)   # Load XGB in JSON format
+    model.load_model(path)
     return model
 
 def load_models():
@@ -26,17 +26,17 @@ def load_models():
     }
 
     print("XGB MODEL TYPE =", type(models["xgb"]))
-    print("✅ All models loaded! (NO LightGBM)")
+    print("STACKER INPUTS =", models["stacker"].coef_.shape[1])
+    print("✅ Models loaded successfully!")
     return models
 
 
 def predict_from_features(features, models):
     FEATURES = models["features"]
 
-    # Convert feature dict → DataFrame
     X = pd.DataFrame([features])
 
-    # Ensure all required feature columns exist
+    # Ensure missing columns exist
     for col in FEATURES:
         if col not in X.columns:
             X[col] = 0
@@ -54,7 +54,6 @@ def predict_from_features(features, models):
     }])
 
     final_proba = models["stacker"].predict_proba(stack_input)[:, 1][0]
-
     label = "phishing" if final_proba > 0.5 else "legitimate"
 
     return {
