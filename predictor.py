@@ -102,29 +102,40 @@ def predict_from_features(features, models, raw_url=None):
     Uses VT from extractor, not from here.
     """
 
-    # Ensure correct feature order for ML models
+    # Ensure correct feature order and preserve column names
     feature_names = models["features"]
-    X = np.array([[features.get(f, 0) for f in feature_names]], dtype=float)
+
+    # Build DataFrame with exact columns used during training
+    # Fill missing features with 0 and keep the order.
+    X_df = pd.DataFrame([features])
+    for col in feature_names:
+        if col not in X_df.columns:
+            X_df[col] = 0
+    # Reorder to the expected feature order, and coerce to numeric
+    X_df = X_df[feature_names].apply(pd.to_numeric, errors='coerce').fillna(0)
 
     # ----------------------
     # ML MODEL PREDICTIONS
     # ----------------------
     try:
-        p_xgb = float(models["xgb"].predict_proba(X)[0][1])
+        # pass DataFrame (keeps feature names)
+        p_xgb = float(models["xgb"].predict_proba(X_df)[0][1])
     except Exception:
         traceback.print_exc()
         p_xgb = 0.5
 
     try:
-        p_rf = float(models["rf"].predict_proba(X)[0][1])
+        p_rf = float(models["rf"].predict_proba(X_df)[0][1])
     except Exception:
         traceback.print_exc()
         p_rf = 0.5
 
-    # stacker uses [xgb_prob, rf_prob]
-    stack_input = np.array([[p_xgb, p_rf]])
+    # stacker uses DataFrame with named columns (xgb, rf)
+    stack_cols = ["xgb", "rf"]
+    stack_df = pd.DataFrame([{"xgb": p_xgb, "rf": p_rf}])[stack_cols]
+
     try:
-        ml_final_prob = float(models["stacker"].predict_proba(stack_input)[0][1])
+        ml_final_prob = float(models["stacker"].predict_proba(stack_df)[0][1])
     except Exception:
         traceback.print_exc()
         ml_final_prob = (p_xgb + p_rf) / 2
