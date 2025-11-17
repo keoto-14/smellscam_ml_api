@@ -2,11 +2,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
-# Load environment variables (.env)
+# Load .env variables
 load_dotenv()
 
-# Import the new predictor router (from canvas version)
-from predictor import predictor_router
+# Predictor router (new API)
+from predictor import predictor_router, _predictor, PredictRequest, PredictResponse
 
 app = FastAPI(
     title="SmellScam ML API",
@@ -15,7 +15,7 @@ app = FastAPI(
 )
 
 # ------------------------------------------------------
-# CORS — allow access from any frontend
+# CORS
 # ------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
@@ -33,8 +33,20 @@ async def root():
 
 
 # ------------------------------------------------------
-# Mount predictor router
+# NEW ENDPOINT
+# /api/v1/predict
 # ------------------------------------------------------
-# POST /api/v1/predict  → full ML + VT + GSB + rules
 app.include_router(predictor_router, prefix="/api/v1")
 
+
+# ------------------------------------------------------
+# LEGACY ENDPOINT (for PHP frontend)
+# POST /predict
+# ------------------------------------------------------
+@app.post("/predict", response_model=PredictResponse)
+async def legacy_predict(req: PredictRequest):
+    """
+    Legacy endpoint so old PHP files work without updates.
+    Fully identical behavior to /api/v1/predict.
+    """
+    return await _predictor.predict_url(req.url)
