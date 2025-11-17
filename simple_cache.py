@@ -5,7 +5,7 @@ CACHE_DIR = os.path.join("/tmp", "smellscam_cache")
 pathlib.Path(CACHE_DIR).mkdir(parents=True, exist_ok=True)
 
 def _key(k):
-    return os.path.join(CACHE_DIR, hashlib.sha256(k.encode()).hexdigest())
+    return os.path.join(CACHE_DIR, hashlib.sha256(k.encode()).hexdigest() + ".json")
 
 def cache_get(key, max_age=3600):
     p = _key(key)
@@ -17,7 +17,7 @@ def cache_get(key, max_age=3600):
             return None
         with open(p, "r") as f:
             return json.load(f)
-    except:
+    except Exception:
         return None
 
 def cache_set(key, value):
@@ -25,5 +25,5 @@ def cache_set(key, value):
     try:
         with open(p, "w") as f:
             json.dump(value, f)
-    except:
+    except Exception:
         pass
