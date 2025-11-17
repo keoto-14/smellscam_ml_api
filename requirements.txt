@@ -10,3 +10,7 @@ xgboost
 scikit-learn
 pandas
 numpy
+httpx
+fastapi
+cachetools
+pydantic
