@@ -1,6 +1,6 @@
-# ------------------------------
-# Python general ignores
-# ------------------------------
+# =====================================================================
+# PYTHON IGNORE
+# =====================================================================
 __pycache__/
 *.py[cod]
 *.pyo
@@ -10,36 +10,44 @@ __pycache__/
 *.log
 *.tmp
 
-# Virtual environment
+# Virtual environments
 env/
 venv/
 ENV/
 .venv/
 
-# Jupyter & IPython
+# Jupyter
 .ipynb_checkpoints/
 *.ipynb
 
-# Build artifacts
+# Build & distribution
 build/
 dist/
 *.egg-info/
 
-# OS-specific
+# OS files
 .DS_Store
 Thumbs.db
 
-# ------------------------------
-# ML Models
-# ------------------------------
-# ❗ Allow required model files
-!models/
-!models/*.pkl
-!models/*.pickle
-!models/*.joblib
-!models/*.json
+# =====================================================================
+# ML MODELS (ALLOW ONLY SPECIFIC SAFE FILE TYPES)
+# =====================================================================
 
-# Block large/tensor models only
+# Ignore entire models/ folder by default
+models/*
+
+# Allow ONLY required model files
+!models/xgb.json
+!models/rf.pkl
+!models/stacker.pkl
+!models/features.pkl
+
+# (Optional) allow imputer/model configs
+!models/*.json
+!models/*.pkl
+!models/*.joblib
+
+# Block large dangerous formats
 models/*.bin
 models/*.h5
 models/*.onnx
@@ -48,38 +56,38 @@ models/*.ckpt
 models/*checkpoint*
 models/*large*
 
-# ------------------------------
-# Environment variables
-# ------------------------------
+# =====================================================================
+# ENV FILES
+# =====================================================================
 .env
-.env.*
+.env.* 
 *.env
 
-# ------------------------------
-# Cache & tmp
-# ------------------------------
+# =====================================================================
+# CACHES / TEMP
+# =====================================================================
 .cache/
 tmp/
 temp/
 logs/
 *.sqlite3
 
-# ------------------------------
-# Node (if front-end appears)
-# ------------------------------
+# =====================================================================
+# NODE JS
+# =====================================================================
 node_modules/
 npm-debug.log
 yarn-error.log
 
-# ------------------------------
-# IDE settings
-# ------------------------------
+# =====================================================================
+# EDITOR SETTINGS
+# =====================================================================
 .vscode/
 .idea/
 *.iml
 *.code-workspace
 
-# ------------------------------
-# Railway build leftovers
-# ------------------------------
+# =====================================================================
+# RAILWAY
+# =====================================================================
 railway/
