@@ -1,44 +1,61 @@
+# predictor.py  — CLEAN & STABLE VERSION
 import os
 import pickle
 import numpy as np
 import pandas as pd
 import urllib.parse
+import re
+import warnings
 import requests
-from xgboost import XGBClassifier
-from simple_cache import cache_get, cache_set
 
+# -------------------------------------------------------
+# 🔇 DISABLE ALL SKLEARN & XGBOOST WARNINGS
+# -------------------------------------------------------
+from sklearn.exceptions import DataConversionWarning, DataEfficiencyWarning
+
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=DataConversionWarning)
+warnings.filterwarnings("ignore", category=DataEfficiencyWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore")  # catches everything else
+
+
+# -------------------------------------------------------
+# Model directory
+# -------------------------------------------------------
 MODEL_DIR = "models"
 
-
-###############################################
-# LOADING MODELS
-###############################################
 def load_pickle(path):
     with open(path, "rb") as f:
         return pickle.load(f)
 
 def load_xgb_model(path):
+    from xgboost import XGBClassifier
     model = XGBClassifier()
     model.load_model(path)
     return model
 
 def load_models():
     print("📦 Loading ML models...")
+
     models = {
         "xgb": load_xgb_model(os.path.join(MODEL_DIR, "xgb.json")),
         "rf": load_pickle(os.path.join(MODEL_DIR, "rf.pkl")),
         "stacker": load_pickle(os.path.join(MODEL_DIR, "stacker.pkl")),
         "features": load_pickle(os.path.join(MODEL_DIR, "features.pkl")),
     }
+
     print("XGB MODEL:", type(models["xgb"]))
     print("STACKER INPUTS:", models["stacker"].coef_.shape[1])
     print("Models loaded successfully!")
+
     return models
 
 
-###############################################
+# -------------------------------------------------------
 # GOOGLE SAFE BROWSING
-###############################################
+# -------------------------------------------------------
+from simple_cache import cache_get, cache_set
 GSB_API_KEY = os.environ.get("GSB_API_KEY")
 
 def check_gsb(url):
@@ -62,7 +79,7 @@ def check_gsb(url):
     }
 
     try:
-        r = requests.post(endpoint, json=body, timeout=4)
+        r = requests.post(endpoint, json=body, timeout=5)
         result = bool(r.json().get("matches"))
         cache_set(cache_key, result)
         return result
@@ -70,9 +87,9 @@ def check_gsb(url):
         return False
 
 
-###############################################
-# VIRUSTOTAL FAST-DOMAIN CHECK
-###############################################
+# -------------------------------------------------------
+# VIRUSTOTAL DOMAIN RISK
+# -------------------------------------------------------
 VT_API_KEY = os.environ.get("VT_API_KEY")
 
 def vt_domain_report(domain):
@@ -87,9 +104,9 @@ def vt_domain_report(domain):
     try:
         headers = {"x-apikey": VT_API_KEY}
         url = f"https://www.virustotal.com/api/v3/domains/{domain}"
-        r = requests.get(url, headers=headers, timeout=5)
-        stats = r.json().get("data", {}).get("attributes", {}).get("last_analysis_stats", {})
+        r = requests.get(url, headers=headers, timeout=6)
 
+        stats = r.json().get("data", {}).get("attributes", {}).get("last_analysis_stats", {})
         total = sum(stats.values()) if stats else 0
         mal = stats.get("malicious", 0) if stats else 0
         ratio = mal / total if total > 0 else 0
@@ -101,49 +118,34 @@ def vt_domain_report(domain):
         return 0, 0, 0.0
 
 
-###############################################
-# SHOPPING WEBSITE DETECTOR (NEW)
-###############################################
-SHOPPING_KEYWORDS = [
-    "shop", "store", "product", "products", "item",
-    "cart", "checkout", "buy", "sale", "collections",
-    "payment", "add-to-cart"
-]
+# -------------------------------------------------------
+# RULES
+# -------------------------------------------------------
+SUSPICIOUS_TLDS = {".asia", ".top", ".icu", ".shop", ".online", ".xyz", ".store"}
+BRAND_LIST = ["nike", "adidas", "asics", "apple", "samsung", "puma", "uniqlo", "dhl", "fedex"]
 
-# websites that are NEVER shopping sites
-WHITELIST_NONE_SHOPPING = [
-    "facebook.com", "instagram.com", "youtube.com",
-    "twitter.com", "gmi.edu.my", "uitm.edu.my",
-    "ox.ac.uk", "w3schools.com", "github.com"
-]
-
-def detect_shopping_site(raw_url, domain):
-    url_l = (raw_url or "").lower()
-
-    # 1) whitelist → not shopping
-    if domain in WHITELIST_NONE_SHOPPING:
-        return False
-
-    # 2) keywords in URL → shopping
-    if any(k in url_l for k in SHOPPING_KEYWORDS):
-        return True
-
-    # 3) brands that typically have shopping sites
-    if any(b in domain for b in ["nike", "adidas", "asics", "puma", "uniqlo", "zara"]):
-        return True
-
+def detect_brand_impersonation(domain):
+    for brand in BRAND_LIST:
+        if brand in domain and not domain.endswith(brand + ".com"):
+            return True
     return False
 
+def detect_redirect_scam(url):
+    return int("utm_" in url.lower() or "fbclid" in url.lower())
 
-###############################################
-# MAIN HYBRID PREDICTOR
-###############################################
-def predict_from_features(features, models, raw_url=None):
 
+# -------------------------------------------------------
+# MAIN PREDICTION ENGINE
+# -------------------------------------------------------
+def predict_from_features(features, models, raw_url):
     feature_names = models["features"]
-    X = np.array([[features.get(f, 0) for f in feature_names]], dtype=float)
 
-    # ML models
+    # ---------------------------------------------------
+    # Convert to pure numeric array (prevents warnings)
+    # ---------------------------------------------------
+    X = np.asarray([[float(features.get(f, 0)) for f in feature_names]], dtype=float)
+
+    # ML predictions
     try:
         p_xgb = float(models["xgb"].predict_proba(X)[0][1])
     except:
@@ -154,7 +156,8 @@ def predict_from_features(features, models, raw_url=None):
     except:
         p_rf = 0.5
 
-    stack_input = np.array([[p_xgb, p_rf]])
+    # Stacker: combines both
+    stack_input = np.asarray([[p_xgb, p_rf]], dtype=float)
     try:
         final_ml = float(models["stacker"].predict_proba(stack_input)[0][1])
     except:
@@ -162,39 +165,61 @@ def predict_from_features(features, models, raw_url=None):
 
     ml_risk = final_ml * 100
 
-    # Domain parsing
-    parsed = urllib.parse.urlparse(raw_url or "")
+    # ---------------------------------------------------
+    # VIRUSTOTAL RISK (heavy weight)
+    # ---------------------------------------------------
+    parsed = urllib.parse.urlparse(raw_url)
     domain = parsed.netloc.lower().split(":")[0]
 
-    # VIRUSTOTAL DOMAIN SCORE
     vt_total, vt_mal, vt_ratio = vt_domain_report(domain)
     vt_risk = ((vt_ratio * 100) ** 2) / 100
     vt_risk = min(vt_risk, 100)
 
+    # ---------------------------------------------------
     # GOOGLE SAFE BROWSING
-    gsb = check_gsb(raw_url)
-    gsb_risk = 100 if gsb else 0
+    # ---------------------------------------------------
+    gsb_match = check_gsb(raw_url)
+    gsb_risk = 100 if gsb_match else 0
 
-    # FINAL RISK WEIGHTS
+    # ---------------------------------------------------
+    # CUSTOM RULES
+    # ---------------------------------------------------
+    rule_risk = 0
+
+    # suspicious TLDs
+    for tld in SUSPICIOUS_TLDS:
+        if domain.endswith(tld):
+            rule_risk += 15
+
+    # brand impersonation
+    if detect_brand_impersonation(domain):
+        rule_risk += 25
+
+    # redirects
+    if detect_redirect_scam(raw_url):
+        rule_risk += 10
+
+    # ---------------------------------------------------
+    # FINAL WEIGHTED RISK
+    # ---------------------------------------------------
     FINAL_RISK = (
         ml_risk * 0.50 +
         vt_risk * 0.45 +
-        gsb_risk * 0.05
+        gsb_risk * 0.05 +
+        rule_risk
     )
-    FINAL_RISK = min(max(FINAL_RISK, 0), 100)
+
+    FINAL_RISK = max(0, min(FINAL_RISK, 100))
     trust = 100 - FINAL_RISK
 
     prediction = "phishing" if FINAL_RISK >= 50 else "safe"
-
-    # SHOPPING DETECTOR (NEW)
-    is_shopping = detect_shopping_site(raw_url, domain)
 
     return {
         "prediction": prediction,
         "trust_score": round(trust, 3),
         "risk_score": round(FINAL_RISK, 3),
-        "gsb_match": bool(gsb),
+        "gsb_match": bool(gsb_match),
         "vt": {"total_vendors": vt_total, "malicious": vt_mal, "ratio": vt_ratio},
         "model_probs": {"xgb": p_xgb, "rf": p_rf, "ml_final": final_ml},
-        "is_shopping": is_shopping
+        "rule_risk": rule_risk,
     }
