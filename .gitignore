@@ -6,9 +6,6 @@ __pycache__/
 *.pyo
 *.pyd
 *.pdb
-*.pkl
-*.pickle
-*.joblib
 *.cache/
 *.log
 *.tmp
@@ -28,25 +25,28 @@ build/
 dist/
 *.egg-info/
 
-# Byte-compiled files
-*.so
-
 # OS-specific
 .DS_Store
 Thumbs.db
 
 # ------------------------------
-# ML Models — we keep them but ignore extra large versions
+# ML Models
 # ------------------------------
-# allow compressed models like xgb.json and rf.pkl
-# but ignore accidental huge checkpoints
+# ❗ Allow required model files
+!models/
+!models/*.pkl
+!models/*.pickle
+!models/*.joblib
+!models/*.json
+
+# Block large/tensor models only
 models/*.bin
-models/*.model
-models/*.txt
 models/*.h5
 models/*.onnx
 models/*.pt
 models/*.ckpt
+models/*checkpoint*
+models/*large*
 
 # ------------------------------
 # Environment variables
@@ -54,10 +54,9 @@ models/*.ckpt
 .env
 .env.*
 *.env
-.vscode/settings.json
 
 # ------------------------------
-# Cache & temp files
+# Cache & tmp
 # ------------------------------
 .cache/
 tmp/
@@ -66,14 +65,14 @@ logs/
 *.sqlite3
 
 # ------------------------------
-# Node (if frontend accidentally added)
+# Node (if front-end appears)
 # ------------------------------
 node_modules/
 npm-debug.log
 yarn-error.log
 
 # ------------------------------
-# IDE / Editor settings
+# IDE settings
 # ------------------------------
 .vscode/
 .idea/
@@ -81,6 +80,6 @@ yarn-error.log
 *.code-workspace
 
 # ------------------------------
-# Railway build artifacts
+# Railway build leftovers
 # ------------------------------
 railway/
