@@ -1,20 +1,22 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-import traceback
 from dotenv import load_dotenv
 
+# Load environment variables (.env)
 load_dotenv()
 
-from predictor import load_models, predict_from_features
-from url_feature_extractor import extract_all_features
+# Import the new predictor router (from canvas version)
+from predictor import predictor_router
 
 app = FastAPI(
     title="SmellScam ML API",
-    description="Hybrid ML + VT + GSB with Online Shopping Filtering",
-    version="2.0"
+    description="Hybrid ML + VirusTotal + Google Safe Browsing + Heuristics",
+    version="3.0"
 )
 
+# ------------------------------------------------------
+# CORS — allow access from any frontend
+# ------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -22,25 +24,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-models = load_models()
-
-
-class URLRequest(BaseModel):
-    url: str
-
-
+# ------------------------------------------------------
+# Root endpoint
+# ------------------------------------------------------
 @app.get("/")
 async def root():
-    return {"message": "SmellScam ML API Running"}
+    return {"message": "SmellScam ML API Running", "version": "3.0"}
 
 
-@app.post("/predict")
-async def predict(req: URLRequest):
-    try:
-        url = req.url.strip()
-        features = extract_all_features(url)
-        result = predict_from_features(features, models, raw_url=url)
-        return result
-    except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+# ------------------------------------------------------
+# Mount predictor router
+# ------------------------------------------------------
+# POST /api/v1/predict  → full ML + VT + GSB + rules
+app.include_router(predictor_router, prefix="/api/v1")
+
