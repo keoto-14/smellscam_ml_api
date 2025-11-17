@@ -4,6 +4,7 @@ import re
 import socket
 import ssl
 import urllib.parse
+import time
 from datetime import datetime
 
 try:
@@ -26,23 +27,60 @@ try:
 except Exception:
     dns = None
 
-# safe helper functions
-def extract_host(url):
-    if "://" not in url:
-        url = "http://" + url
-    p = urllib.parse.urlparse(url)
-    host = p.netloc.split(":")[0].lower()
-    return p, host
+try:
+    from simple_cache import cache_get, cache_set
+except Exception:
+    _CACHE = {}
+    def cache_get(k, max_age=3600):
+        if k not in _CACHE:
+            return None
+        ts, val = _CACHE[k]
+        if time.time() - ts > max_age:
+            return None
+        return val
+    def cache_set(k, v):
+        _CACHE[k] = (time.time(), v)
 
-def safe_request_text(url, timeout=6):
+VT_API_KEY = os.environ.get("VT_API_KEY")
+
+def vt_scan_info(url_or_host):
+    if not VT_API_KEY or requests is None:
+        return 0, 0, 0.0
+    try:
+        parsed = urllib.parse.urlparse(url_or_host if "://" in url_or_host else "http://" + url_or_host)
+        domain = (parsed.netloc or url_or_host).split(":")[0].lower()
+    except Exception:
+        domain = url_or_host.lower().split(":")[0]
+
+    cache_key = f"vt_domain::{domain}"
+    cached = cache_get(cache_key, max_age=3600)
+    if cached:
+        return cached["total"], cached["malicious"], cached["ratio"]
+
+    headers = {"x-apikey": VT_API_KEY}
+    try:
+        r = requests.get(f"https://www.virustotal.com/api/v3/domains/{domain}", headers=headers, timeout=6)
+        if r.status_code == 200:
+            stats = r.json().get("data", {}).get("attributes", {}).get("last_analysis_stats", {})
+            if isinstance(stats, dict):
+                total = sum(stats.values())
+                malicious = stats.get("malicious", 0)
+                ratio = malicious / total if total > 0 else 0.0
+                cache_set(cache_key, {"total": total, "malicious": malicious, "ratio": ratio})
+                return total, malicious, ratio
+    except Exception:
+        pass
+    return 0, 0, 0.0
+
+def safe_request(url, timeout=6, verify=False, max_bytes=200000):
     if requests is None:
         return None
     try:
-        r = requests.get(url, timeout=timeout, headers={"User-Agent": "smellscam-agent"}, stream=True, verify=False)
+        r = requests.get(url, timeout=timeout, verify=verify, headers={"User-Agent":"Mozilla/5.0 (smellscam)"}, stream=True)
         content = b""
         for chunk in r.iter_content(chunk_size=4096):
             content += chunk
-            if len(content) > 200000:
+            if len(content) > max_bytes:
                 break
         return content.decode(errors="ignore")
     except Exception:
@@ -70,7 +108,7 @@ def safe_whois(host):
 def safe_ssl_valid(host):
     try:
         ctx = ssl.create_default_context()
-        conn = socket.create_connection((host, 443), timeout=4)
+        conn = socket.create_connection((host, 443), timeout=5)
         sock = ctx.wrap_socket(conn, server_hostname=host)
         cert = sock.getpeercert()
         sock.close()
@@ -89,23 +127,20 @@ def safe_quad9_blocked(host):
     except Exception:
         return 1
 
-# minimal lexical + safe live features
 def extract_all_features(url):
-    p, host = extract_host(url)
-    path = p.path or "/"
     url_l = url.lower()
-
+    parsed = urllib.parse.urlparse(url if "://" in url else "http://" + url)
+    host = parsed.netloc.split(":")[0].lower()
+    path = parsed.path or "/"
     f = {}
+
     # lexical
-    f["url"] = url
     f["length_url"] = len(url)
     f["length_hostname"] = len(host)
     f["nb_dots"] = host.count(".")
     f["nb_hyphens"] = host.count("-")
     f["nb_numeric_chars"] = sum(c.isdigit() for c in url)
-    f["contains_scam_keyword"] = int(any(k in url_l for k in [
-        "login","verify","secure","bank","account","update","confirm","urgent","pay","gift","free","click","signin"
-    ]))
+    f["contains_scam_keyword"] = int(any(k in url_l for k in ["login","verify","secure","bank","account","update","confirm","urgent","pay","gift","free","click","signin"]))
     f["nb_at"] = url.count("@")
     f["nb_qm"] = url.count("?")
     f["nb_and"] = url.count("&")
@@ -130,7 +165,7 @@ def extract_all_features(url):
     f["ratio_digits_url"] = (sum(c.isdigit() for c in url) / max(1, len(url))) * 100
     f["ratio_digits_host"] = (sum(c.isdigit() for c in host) / max(1, len(host))) * 100
 
-    # live (safe fallbacks)
+    # live
     age = safe_whois(host)
     f["domain_age_days"] = age if age is not None else 365
     ssl_ok = safe_ssl_valid(host)
@@ -138,37 +173,30 @@ def extract_all_features(url):
     q9 = safe_quad9_blocked(host)
     f["quad9_blocked"] = int(q9) if q9 is not None else 0
 
-    # placeholders for vt (predictor will call vt_domain_report separately)
-    f["vt_total_vendors"] = 0
-    f["vt_malicious_count"] = 0
-    f["vt_detection_ratio"] = 0.0
+    vt_total, vt_mal, vt_ratio = vt_scan_info(url)
+    f["vt_total_vendors"] = vt_total
+    f["vt_malicious_count"] = vt_mal
+    f["vt_detection_ratio"] = vt_ratio
 
-    # HTML features (safe)
-    html = safe_request_text(url)
-    soup = None
-    if html and BeautifulSoup:
-        try:
-            soup = BeautifulSoup(html, "html.parser")
-        except Exception:
-            soup = None
-
-    def external_favicon_flag():
+    # html
+    html = safe_request(url, verify=False)
+    soup = BeautifulSoup(html, "html.parser") if (BeautifulSoup and html) else None
+    def external_favicon():
         if not soup:
             return 0
         try:
             link = soup.find("link", rel=re.compile(".*icon.*", re.I))
             if not link:
                 return 0
-            href = link.get("href", "")
+            href = link.get("href","")
             if href.startswith("data:"):
                 return 0
-            p2 = urllib.parse.urlparse(href if "://" in href else f"http://{host}{href}")
-            fav_host = p2.netloc.split(":")[0]
+            parsed2 = urllib.parse.urlparse(href if "://" in href else f"http://{host}{href}")
+            fav_host = parsed2.netloc.split(":")[0]
             return 0 if fav_host.endswith(host) else 1
         except Exception:
             return 0
-
-    f["external_favicon"] = external_favicon_flag()
+    f["external_favicon"] = external_favicon()
     if soup:
         login = 0
         for form in soup.find_all("form"):
@@ -177,27 +205,30 @@ def extract_all_features(url):
                 login = 1
                 break
         f["login_form"] = login
-        f["iframe_present"] = int(bool(soup.find_all("iframe")))
-        body = soup.get_text(" ", strip=True).lower()
-        f["popup_window"] = int(any(k in body for k in ["popup","modal","cookie","overlay","subscribe"]))
-        f["right_click_disabled"] = int("oncontextmenu" in (html or "").lower())
-        try:
-            title = soup.title.string.strip() if soup and soup.title else ""
-            f["empty_title"] = int(title == "")
-        except Exception:
-            f["empty_title"] = 0
-        # web traffic heuristic
-        wc = len(re.findall(r"\w+", body))
-        f["web_traffic"] = 1000 if wc > 2000 else 500 if wc > 500 else 100 if wc > 100 else 10
     else:
         f["login_form"] = 0
-        f["iframe_present"] = 0
-        f["popup_window"] = 0
-        f["right_click_disabled"] = 0
+    f["iframe_present"] = int(bool(soup.find_all("iframe"))) if soup else 0
+    body = soup.get_text(" ", strip=True).lower() if soup else ""
+    f["popup_window"] = int(any(k in body for k in ["popup","modal","cookie","overlay","subscribe"]))
+    f["right_click_disabled"] = int("oncontextmenu" in (html or "").lower())
+    try:
+        title = soup.title.string.strip() if soup and soup.title else ""
+        f["empty_title"] = int(title == "")
+    except Exception:
         f["empty_title"] = 0
+    if body:
+        wc = len(re.findall(r"\w+", body))
+        if wc > 2000:
+            f["web_traffic"] = 1000
+        elif wc > 500:
+            f["web_traffic"] = 500
+        elif wc > 100:
+            f["web_traffic"] = 100
+        else:
+            f["web_traffic"] = 10
+    else:
         f["web_traffic"] = 100
 
-    # ensure expected keys (safe defaults)
     expected = [
         "length_url","length_hostname","nb_dots","nb_hyphens","nb_numeric_chars",
         "contains_scam_keyword","nb_at","nb_qm","nb_and","nb_underscore",
@@ -209,6 +240,7 @@ def extract_all_features(url):
         "external_favicon","login_form","iframe_present","popup_window",
         "right_click_disabled","empty_title","web_traffic"
     ]
+
     for k in expected:
         if k not in f:
             if k in ("ssl_valid","shortening_service","nb_www","path_extension_php",
@@ -226,4 +258,6 @@ def extract_all_features(url):
                 f[k] = 0.0
             else:
                 f[k] = 0
+    # also include raw url for predictor convenience
+    f["url"] = url
     return f
