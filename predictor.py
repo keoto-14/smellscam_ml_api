@@ -1,17 +1,18 @@
 import os
 import pickle
-import urllib.parse
 import numpy as np
+import pandas as pd
+import urllib.parse
+import requests
 from xgboost import XGBClassifier
 from simple_cache import cache_get, cache_set
-from url_feature_extractor import safe_request
-
-###############################################
-# LOAD MODELS
-###############################################
 
 MODEL_DIR = "models"
 
+
+###############################################
+# LOADING MODELS
+###############################################
 def load_pickle(path):
     with open(path, "rb") as f:
         return pickle.load(f)
@@ -29,63 +30,120 @@ def load_models():
         "stacker": load_pickle(os.path.join(MODEL_DIR, "stacker.pkl")),
         "features": load_pickle(os.path.join(MODEL_DIR, "features.pkl")),
     }
+    print("XGB MODEL:", type(models["xgb"]))
+    print("STACKER INPUTS:", models["stacker"].coef_.shape[1])
     print("Models loaded successfully!")
     return models
 
 
 ###############################################
-# SHOPPING WEBSITE DETECTOR
+# GOOGLE SAFE BROWSING
 ###############################################
+GSB_API_KEY = os.environ.get("GSB_API_KEY")
 
+def check_gsb(url):
+    if not GSB_API_KEY:
+        return False
+
+    cache_key = f"gsb::{url}"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    endpoint = f"https://safebrowsing.googleapis.com/v4/threatMatches:find?key={GSB_API_KEY}"
+    body = {
+        "client": {"clientId": "smellscam", "clientVersion": "1.0"},
+        "threatInfo": {
+            "threatTypes": ["MALWARE","SOCIAL_ENGINEERING","UNWANTED_SOFTWARE"],
+            "platformTypes": ["ANY_PLATFORM"],
+            "threatEntryTypes": ["URL"],
+            "threatEntries": [{"url": url}]
+        }
+    }
+
+    try:
+        r = requests.post(endpoint, json=body, timeout=4)
+        result = bool(r.json().get("matches"))
+        cache_set(cache_key, result)
+        return result
+    except:
+        return False
+
+
+###############################################
+# VIRUSTOTAL FAST-DOMAIN CHECK
+###############################################
+VT_API_KEY = os.environ.get("VT_API_KEY")
+
+def vt_domain_report(domain):
+    if not VT_API_KEY:
+        return 0, 0, 0.0
+
+    cache_key = f"vt::{domain}"
+    cached = cache_get(cache_key)
+    if cached:
+        return cached["total"], cached["mal"], cached["ratio"]
+
+    try:
+        headers = {"x-apikey": VT_API_KEY}
+        url = f"https://www.virustotal.com/api/v3/domains/{domain}"
+        r = requests.get(url, headers=headers, timeout=5)
+        stats = r.json().get("data", {}).get("attributes", {}).get("last_analysis_stats", {})
+
+        total = sum(stats.values()) if stats else 0
+        mal = stats.get("malicious", 0) if stats else 0
+        ratio = mal / total if total > 0 else 0
+
+        cache_set(cache_key, {"total": total, "mal": mal, "ratio": ratio})
+        return total, mal, ratio
+
+    except:
+        return 0, 0, 0.0
+
+
+###############################################
+# SHOPPING WEBSITE DETECTOR (NEW)
+###############################################
 SHOPPING_KEYWORDS = [
-    "add to cart", "cart", "checkout", "shop", "store",
-    "product", "products", "item", "buy", "buy now",
-    "sale", "new arrivals", "order", "wishlist"
+    "shop", "store", "product", "products", "item",
+    "cart", "checkout", "buy", "sale", "collections",
+    "payment", "add-to-cart"
 ]
 
-def is_shopping_website(url, html=""):
-    url_l = url.lower()
+# websites that are NEVER shopping sites
+WHITELIST_NONE_SHOPPING = [
+    "facebook.com", "instagram.com", "youtube.com",
+    "twitter.com", "gmi.edu.my", "uitm.edu.my",
+    "ox.ac.uk", "w3schools.com", "github.com"
+]
 
-    # URL-based cues
-    for kw in SHOPPING_KEYWORDS:
-        if kw.replace(" ", "") in url_l.replace(" ", ""):
-            return True
+def detect_shopping_site(raw_url, domain):
+    url_l = (raw_url or "").lower()
 
-    # HTML-based cues (stronger signal)
-    html_l = html.lower()
-    for kw in SHOPPING_KEYWORDS:
-        if kw in html_l:
-            return True
+    # 1) whitelist → not shopping
+    if domain in WHITELIST_NONE_SHOPPING:
+        return False
+
+    # 2) keywords in URL → shopping
+    if any(k in url_l for k in SHOPPING_KEYWORDS):
+        return True
+
+    # 3) brands that typically have shopping sites
+    if any(b in domain for b in ["nike", "adidas", "asics", "puma", "uniqlo", "zara"]):
+        return True
 
     return False
 
 
-
 ###############################################
-# ML PREDICTOR
+# MAIN HYBRID PREDICTOR
 ###############################################
 def predict_from_features(features, models, raw_url=None):
 
-    # ---------------------------------------------------
-    # 0) SHOPPING CHECK (HTML + URL)
-    # ---------------------------------------------------
-    html = safe_request(raw_url, timeout=5)
-
-    if not is_shopping_website(raw_url, html):
-        return {
-            "error": "not_shopping",
-            "message": "Sorry, this link is not an online shopping website.",
-            "prediction": "safe",
-            "trust_score": 100,
-            "risk_score": 0
-        }
-
-    # ---------------------------------------------------
-    # 1) ML PREDICTION
-    # ---------------------------------------------------
     feature_names = models["features"]
     X = np.array([[features.get(f, 0) for f in feature_names]], dtype=float)
 
+    # ML models
     try:
         p_xgb = float(models["xgb"].predict_proba(X)[0][1])
     except:
@@ -104,12 +162,39 @@ def predict_from_features(features, models, raw_url=None):
 
     ml_risk = final_ml * 100
 
-    trust = 100 - ml_risk
-    prediction = "phishing" if ml_risk >= 50 else "safe"
+    # Domain parsing
+    parsed = urllib.parse.urlparse(raw_url or "")
+    domain = parsed.netloc.lower().split(":")[0]
+
+    # VIRUSTOTAL DOMAIN SCORE
+    vt_total, vt_mal, vt_ratio = vt_domain_report(domain)
+    vt_risk = ((vt_ratio * 100) ** 2) / 100
+    vt_risk = min(vt_risk, 100)
+
+    # GOOGLE SAFE BROWSING
+    gsb = check_gsb(raw_url)
+    gsb_risk = 100 if gsb else 0
+
+    # FINAL RISK WEIGHTS
+    FINAL_RISK = (
+        ml_risk * 0.50 +
+        vt_risk * 0.45 +
+        gsb_risk * 0.05
+    )
+    FINAL_RISK = min(max(FINAL_RISK, 0), 100)
+    trust = 100 - FINAL_RISK
+
+    prediction = "phishing" if FINAL_RISK >= 50 else "safe"
+
+    # SHOPPING DETECTOR (NEW)
+    is_shopping = detect_shopping_site(raw_url, domain)
 
     return {
         "prediction": prediction,
-        "trust_score": round(trust, 2),
-        "risk_score": round(ml_risk, 2),
-        "model_probs": {"xgb": p_xgb, "rf": p_rf, "ml_final": final_ml}
+        "trust_score": round(trust, 3),
+        "risk_score": round(FINAL_RISK, 3),
+        "gsb_match": bool(gsb),
+        "vt": {"total_vendors": vt_total, "malicious": vt_mal, "ratio": vt_ratio},
+        "model_probs": {"xgb": p_xgb, "rf": p_rf, "ml_final": final_ml},
+        "is_shopping": is_shopping
     }
