@@ -5,251 +5,219 @@ import traceback
 import numpy as np
 import pandas as pd
 from xgboost import XGBClassifier
+from simple_cache import cache_get, cache_set
+import requests
+import urllib.parse
 
-MODEL_DIR = os.environ.get("MODEL_DIR", "models")
+MODEL_DIR = "models"
 
-def _load_pickle(path):
+def load_pickle(path):
     with open(path, "rb") as f:
         return pickle.load(f)
 
-def _load_xgb(path):
-    """
-    Load XGBoost model saved with XGBClassifier().save_model("xgb.json")
-    Returns an XGBClassifier instance with the model loaded.
-    """
+def load_xgb_model(path):
+    # load XGBoost saved JSON (trained with XGBClassifier().save_model)
     model = XGBClassifier()
     model.load_model(path)
     return model
 
 def load_models():
-    """
-    Loads models from MODEL_DIR and returns dict.
-    Expected files:
-      - models/xgb.json          (optional)
-      - models/rf.pkl
-      - models/stacker.pkl
-      - models/features.pkl     (list of feature names in correct order)
-    """
     print("📦 Loading ML models...")
-
-    models = {}
+    # Expected files: xgb.json, rf.pkl, stacker.pkl, features.pkl
+    models = {
+        "xgb": load_xgb_model(os.path.join(MODEL_DIR, "xgb.json")),
+        "rf": load_pickle(os.path.join(MODEL_DIR, "rf.pkl")),
+        "stacker": load_pickle(os.path.join(MODEL_DIR, "stacker.pkl")),
+        "features": load_pickle(os.path.join(MODEL_DIR, "features.pkl")),
+    }
+    print("XGB MODEL:", type(models["xgb"]))
     try:
-        xgb_path = os.path.join(MODEL_DIR, "xgb.json")
-        if os.path.exists(xgb_path):
-            models["xgb"] = _load_xgb(xgb_path)
-            print(" - xgb loaded:", type(models["xgb"]))
-        else:
-            print(" - xgb not found:", xgb_path)
-            models["xgb"] = None
-    except Exception:
-        traceback.print_exc()
-        models["xgb"] = None
-
-    try:
-        rf_path = os.path.join(MODEL_DIR, "rf.pkl")
-        models["rf"] = _load_pickle(rf_path)
-        print(" - rf loaded:", type(models["rf"]))
-    except Exception:
-        traceback.print_exc()
-        models["rf"] = None
-
-    try:
-        stacker_path = os.path.join(MODEL_DIR, "stacker.pkl")
-        models["stacker"] = _load_pickle(stacker_path)
-        print(" - stacker loaded:", type(models["stacker"]))
-    except Exception:
-        traceback.print_exc()
-        models["stacker"] = None
-
-    try:
-        features_path = os.path.join(MODEL_DIR, "features.pkl")
-        models["features"] = _load_pickle(features_path)
-        # features should be a list/iterable of column names used in training
-        print(" - features loaded: %d features" % len(models["features"]))
-    except Exception:
-        traceback.print_exc()
-        models["features"] = None
-
-    print("✅ Model load finished.")
-    return models
-
-
-# helper: build stacker input DataFrame matching required column names
-def _build_stacker_input_dict(probs_dict, stacker):
-    """
-    probs_dict: {"xgb": float, "rf": float, "lgb": float, ...}
-    stacker: trained sklearn estimator (LogisticRegression, etc.)
-    returns: Ordered dict / dataframe row that matches stacker.feature_names_in_ if present
-    """
-    # Preferred: use feature_names_in_ (sklearn 1.0+)
-    if stacker is None:
-        # best-effort: return xgb, rf if present
-        keys = ["xgb", "rf", "lgb"]
-        return {k: float(probs_dict.get(k, 0.5)) for k in keys if k in probs_dict}
-
-    # sklearn exposes .feature_names_in_ for many estimators when trained with DataFrame
-    if hasattr(stacker, "feature_names_in_"):
-        req = list(stacker.feature_names_in_)
-        return {name: float(probs_dict.get(name, 0.5)) for name in req}
-
-    # fallback: try to infer number of inputs from coef_
-    try:
-        n_in = stacker.coef_.shape[1]
-        # common stacking orders: ['xgb','rf','lgb'], or ['lgb','xgb','rf']
-        common_orders = [
-            ["lgb", "xgb", "rf"],
-            ["xgb", "rf", "lgb"],
-            ["xgb", "rf"],
-            ["rf", "xgb"]
-        ]
-        for order in common_orders:
-            if len(order) == n_in:
-                return {k: float(probs_dict.get(k, 0.5)) for k in order}
+        print("Stacker inputs:", models["stacker"].coef_.shape[1])
     except Exception:
         pass
+    print("Models loaded successfully!")
+    return models
 
-    # last resort: return available probabilities in deterministic order
-    out = {}
-    for k in sorted(probs_dict.keys()):
-        if len(out) >= (stacker.coef_.shape[1] if hasattr(stacker, "coef_") else len(probs_dict)):
-            break
-        out[k] = float(probs_dict[k])
-    return out
+# -------------------------------
+# Google Safe Browsing (GSB)
+# -------------------------------
+GSB_API_KEY = os.environ.get("GSB_API_KEY")
 
+def check_gsb(url):
+    """Return True if GSB reports a match. Cached to /tmp via simple_cache."""
+    if not GSB_API_KEY or not url:
+        return False
 
-def predict_from_features(features: dict, models: dict, raw_url: str = None):
-    """
-    features: dict mapping feature_name -> value (extracted by url_feature_extractor)
-    models: dict from load_models()
-    raw_url: original URL string (optional)
-    Returns a dict:
-      {
-        "prediction": "phishing"|"safe"|"legitimate" (string),
-        "trust_score": float (0-100),
-        "risk_score": float (0-100),
-        "gsb_match": bool (if available),
-        "vt": {...},
-        "model_probs": {...},
-        "debug": {...}  # optional
-      }
-    """
-    # Basic validation
-    feature_names = models.get("features")
-    if not feature_names:
-        raise RuntimeError("models['features'] not found. Place features.pkl into models/")
+    cache_key = f"gsb::{url}"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return cached
 
-    # Build DataFrame with *exact* column order
-    df = pd.DataFrame([{k: features.get(k, 0) for k in feature_names}])
-
-    # Coerce all columns to numeric (non-numeric -> NaN -> fill 0)
-    for c in df.columns:
-        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
-
-    # Ensure same dtype and shape
-    # Now call each model's predict_proba safely
-    probs = {}
-    debug = {"used_models": []}
-
-    # XGBoost
-    xgb_model = models.get("xgb")
-    if xgb_model is not None:
-        try:
-            # XGBClassifier supports DataFrame input; but ensure it's the same columns order
-            p = xgb_model.predict_proba(df)[:, 1][0]
-            probs["xgb"] = float(p)
-            debug["used_models"].append("xgb")
-        except Exception:
-            # fallback: try with ._leaves / DMatrix? but simplest fallback:
-            traceback.print_exc()
-            probs["xgb"] = 0.5
-    else:
-        probs["xgb"] = 0.5
-
-    # RandomForest
-    rf_model = models.get("rf")
-    if rf_model is not None:
-        try:
-            p = rf_model.predict_proba(df)[:, 1][0]
-            probs["rf"] = float(p)
-            debug["used_models"].append("rf")
-        except Exception:
-            traceback.print_exc()
-            # some RF models were fitted on numpy arrays w/o column names;
-            # scikit-learn warns but still works; if it fails, attempt numpy array fallback
-            try:
-                p = rf_model.predict_proba(df.values)[:, 1][0]
-                probs["rf"] = float(p)
-                debug["used_models"].append("rf(numpy-fallback)")
-            except Exception:
-                traceback.print_exc()
-                probs["rf"] = 0.5
-    else:
-        probs["rf"] = 0.5
-
-    # (optional) other base models if present (lgb, nb, etc.)
-    # add them to probs dict if you have them
-
-    # Build stacker input row using stacker feature names (robust)
-    stacker = models.get("stacker")
-    stack_input_dict = _build_stacker_input_dict(probs, stacker)
-    stack_input_df = pd.DataFrame([stack_input_dict])
-
-    # Coerce numeric
-    for c in stack_input_df.columns:
-        stack_input_df[c] = pd.to_numeric(stack_input_df[c], errors="coerce").fillna(0)
-
-    # Final stacked probability
-    if stacker is not None:
-        try:
-            final_ml_prob = float(stacker.predict_proba(stack_input_df)[:, 1][0])
-            debug["stacker_input_cols"] = list(stack_input_df.columns)
-            debug["stacker_used"] = True
-        except Exception:
-            traceback.print_exc()
-            # fallback: simple average of available base probs
-            final_ml_prob = np.mean(list(probs.values()))
-            debug["stacker_input_cols"] = list(stack_input_df.columns)
-            debug["stacker_used"] = False
-    else:
-        final_ml_prob = np.mean(list(probs.values()))
-        debug["stacker_used"] = False
-
-    # ml_risk in 0..100 (higher = more likely phishing)
-    ml_risk = float(final_ml_prob) * 100.0
-
-    # If you have additional signals (vt, gsb) integrate them here.
-    # For now return ML-only risk & trust score
-    risk_score = ml_risk
-    trust_score = 100.0 - risk_score
-
-    # Format prediction label
-    # threshold 50: phishing
-    label = "phishing" if risk_score >= 50.0 else "safe"
-
-    result = {
-        "prediction": label,
-        "trust_score": round(float(trust_score), 6),
-        "risk_score": round(float(risk_score), 6),
-        "gsb_match": False,
-        "vt": {"total_vendors": 0, "malicious": 0, "ratio": 0.0},
-        "model_probs": {k: float(v) for k, v in probs.items()},
-        "debug": debug
+    endpoint = f"https://safebrowsing.googleapis.com/v4/threatMatches:find?key={GSB_API_KEY}"
+    body = {
+        "client": {"clientId": "smellscam", "clientVersion": "1.0"},
+        "threatInfo": {
+            "threatTypes": ["MALWARE","SOCIAL_ENGINEERING","UNWANTED_SOFTWARE","POTENTIALLY_HARMFUL_APPLICATION"],
+            "platformTypes": ["ANY_PLATFORM"],
+            "threatEntryTypes": ["URL"],
+            "threatEntries": [{"url": url}]
+        }
     }
+    try:
+        r = requests.post(endpoint, json=body, timeout=6)
+        if r.status_code == 200:
+            j = r.json()
+            match = bool(j.get("matches"))
+            cache_set(cache_key, match)
+            return match
+    except Exception:
+        traceback.print_exc()
+    cache_set(cache_key, False)
+    return False
 
-    return result
+# -------------------------------
+# VirusTotal domain report
+# -------------------------------
+VT_API_KEY = os.environ.get("VT_API_KEY")
 
+def vt_domain_report(domain):
+    """Return (total_vendors, malicious_count, ratio) for domain (cached)."""
+    if not VT_API_KEY or not domain:
+        return 0, 0, 0.0
 
-# If run as script, quick smoke test (not executed on import)
-if __name__ == "__main__":
-    print("Quick self-test of predictor.py")
-    m = load_models()
-    # create fake features from saved features list if available
-    if m.get("features"):
-        sample = {k: 0 for k in m["features"]}
-        # example: a short URL
-        sample["length_url"] = 20
-        out = predict_from_features(sample, m, raw_url="https://example.com/test")
-        import json
-        print(json.dumps(out, indent=2))
+    cache_key = f"vt::{domain}"
+    cached = cache_get(cache_key)
+    if cached:
+        return cached.get("total",0), cached.get("malicious",0), cached.get("ratio",0.0)
+
+    try:
+        headers = {"x-apikey": VT_API_KEY}
+        url = f"https://www.virustotal.com/api/v3/domains/{domain}"
+        r = requests.get(url, headers=headers, timeout=6)
+        if r.status_code == 200:
+            j = r.json()
+            stats = j.get("data", {}).get("attributes", {}).get("last_analysis_stats", {})
+            if isinstance(stats, dict):
+                total = sum(stats.values())
+                malicious = stats.get("malicious", 0)
+                ratio = malicious / total if total > 0 else 0.0
+                cache_set(cache_key, {"total": total, "malicious": malicious, "ratio": ratio})
+                return total, malicious, ratio
+    except Exception:
+        traceback.print_exc()
+
+    cache_set(cache_key, {"total": 0, "malicious": 0, "ratio": 0.0})
+    return 0, 0, 0.0
+
+# -------------------------------
+# Extra heuristic rules
+# -------------------------------
+SUSPICIOUS_TLDS = {".asia", ".top", ".icu", ".shop", ".online", ".xyz", ".store"}
+BRAND_LIST = ["nike","adidas","asics","apple","samsung","puma","uniqlo","dhl","fedex"]
+
+def detect_brand_impersonation(domain):
+    for brand in BRAND_LIST:
+        if brand in domain and not domain.endswith(brand + ".com"):
+            return True
+    return False
+
+def detect_redirect_scam(url):
+    low = (url or "").lower()
+    return int("utm_" in low or "fbclid" in low or "gclid" in low)
+
+# -------------------------------
+# Main prediction + hybrid scoring
+# -------------------------------
+def predict_from_features(features, models, raw_url=None):
+    """
+    Returns:
+      { prediction, trust_score, risk_score, gsb_match, vt, model_probs }
+    """
+    feature_names = models["features"]  # list in training order
+
+    # Build DataFrame matching feature order to avoid sklearn warnings
+    X_df = pd.DataFrame([{k: features.get(k, 0) for k in feature_names}])
+
+    # ML model probabilities
+    try:
+        p_xgb = float(models["xgb"].predict_proba(X_df)[:,1][0])
+    except Exception:
+        traceback.print_exc()
+        # fallback neutral
+        p_xgb = 0.5
+
+    try:
+        p_rf = float(models["rf"].predict_proba(X_df)[:,1][0])
+    except Exception:
+        traceback.print_exc()
+        p_rf = 0.5
+
+    # Stacker — trained on [xgb, rf]
+    stack_input_df = pd.DataFrame([{"xgb": p_xgb, "rf": p_rf}])
+    try:
+        final_ml_prob = float(models["stacker"].predict_proba(stack_input_df)[:,1][0])
+    except Exception:
+        traceback.print_exc()
+        # fallback average
+        final_ml_prob = float((p_xgb + p_rf) / 2.0)
+
+    ml_risk = final_ml_prob * 100.0
+
+    # VirusTotal (domain)
+    domain = ""
+    try:
+        domain = (urllib.parse.urlparse(raw_url).netloc or "").lower().split(":")[0]
+    except Exception:
+        domain = ""
+    vt_total, vt_mal, vt_ratio = vt_domain_report(domain)
+    # use quadratic / stronger scaling to emphasize vendors
+    vt_risk = min(100.0, ((vt_ratio * 100.0) ** 2) / 100.0)
+
+    # Google Safe Browsing
+    gsb_match = check_gsb(raw_url)
+    gsb_risk = 100.0 if gsb_match else 0.0
+
+    # heuristic rules
+    rule_risk = 0.0
+    for tld in SUSPICIOUS_TLDS:
+        if domain.endswith(tld):
+            rule_risk += 12.0
+    if detect_brand_impersonation(domain):
+        rule_risk += 20.0
+    if detect_redirect_scam(raw_url):
+        rule_risk += 8.0
+
+    # FINAL WEIGHTS per your request: ML 50%, VT 45%, GSB 5%
+    FINAL_RISK = (
+        ml_risk * 0.50 +
+        vt_risk * 0.45 +
+        gsb_risk * 0.05 +
+        rule_risk
+    )
+    FINAL_RISK = max(0.0, min(100.0, FINAL_RISK))
+
+    trust_score = 100.0 - FINAL_RISK
+
+    # decide label: if GSB matched, force 'phishing'; else threshold 50
+    if gsb_match:
+        prediction = "phishing"
     else:
-        print("No features.pkl found; place it in models/")
+        prediction = "phishing" if FINAL_RISK >= 50.0 else "safe"
+
+    return {
+        "prediction": prediction,
+        "trust_score": round(trust_score, 6),
+        "risk_score": round(FINAL_RISK, 6),
+        "gsb_match": bool(gsb_match),
+        "vt": {
+            "total_vendors": int(vt_total),
+            "malicious": int(vt_mal),
+            "ratio": float(vt_ratio)
+        },
+        "model_probs": {
+            "xgb": float(p_xgb),
+            "rf": float(p_rf),
+            "ml_final_prob": float(final_ml_prob)
+        },
+        "rule_risk": round(rule_risk, 3)
+    }
