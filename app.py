@@ -34,7 +34,6 @@ def predict():
             "url": url,
             "features": feats,
             "result": result,
-            "trust_score": trust_score
         })
     except Exception as e:
         traceback.print_exc()
