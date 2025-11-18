@@ -1,7 +1,6 @@
 # rules.py
 """
-Simple deterministic rule engine used by predictor.
-Returns a rule risk score (0-100) to be blended to final risk.
+Enterprise rule engine — stronger heuristics for SmellScam
 """
 
 import re
@@ -10,54 +9,44 @@ from urllib.parse import urlparse
 SUSPICIOUS_TLDS = {".asia", ".top", ".icu", ".shop", ".online", ".xyz", ".store", ".loan"}
 BRAND_LIST = ["nike", "adidas", "asics", "apple", "samsung", "dhl", "fedex", "paypal", "zara", "amazon", "ebay"]
 
-def detect_brand_impersonation(domain: str):
-    domain = domain.lower()
-    for brand in BRAND_LIST:
-        if brand in domain and not domain.endswith(brand + ".com"):
+def detect_brand_impersonation(domain: str) -> bool:
+    d = (domain or "").lower()
+    for b in BRAND_LIST:
+        if b in d and not d.endswith(b + ".com"):
             return True
     return False
 
-def suspicious_tld(domain: str):
-    domain = domain.lower()
-    for tld in SUSPICIOUS_TLDS:
-        if domain.endswith(tld):
+def suspicious_tld(domain: str) -> bool:
+    d = (domain or "").lower()
+    for t in SUSPICIOUS_TLDS:
+        if d.endswith(t):
             return True
     return False
 
-def many_query_params(url: str):
+def many_query_params(url: str) -> bool:
     try:
         q = urlparse(url).query
-        if not q:
-            return False
-        # count params
-        return len(q.split("&")) >= 4
-    except Exception:
+        return bool(q and len(q.split("&")) >= 4)
+    except:
         return False
 
-def uses_ip(host: str):
+def uses_ip(host: str) -> bool:
+    if not host:
+        return False
     return bool(re.match(r"^\d{1,3}(\.\d{1,3}){3}$", host))
 
-def detect_redirect_scams(url: str):
+def detect_redirect_scams(url: str) -> bool:
     u = (url or "").lower()
-    return int("utm_" in u or "fbclid" in u or "gclid" in u or "ref=" in u)
+    return any(x in u for x in ["utm_", "fbclid", "gclid", "ref="])
 
-def compute_rule_risk(url: str, features: dict = None):
-    """
-    Returns an integer 0-100 representing additional risk from rules.
-    Heuristics:
-      - suspicious tld -> +15
-      - brand impersonation -> +25
-      - many query params -> +10
-      - uses IP -> +20
-      - redirect params -> +10
-    """
-    risk = 0
+def compute_rule_risk(url: str, features: dict = None) -> int:
     try:
         parsed = urlparse(url if url else (features.get("url", "") if features else ""))
         host = parsed.netloc.split(":")[0].lower()
-    except Exception:
+    except:
         host = ""
 
+    risk = 0
     if suspicious_tld(host):
         risk += 15
     if detect_brand_impersonation(host):
@@ -69,5 +58,4 @@ def compute_rule_risk(url: str, features: dict = None):
     if detect_redirect_scams(url):
         risk += 10
 
-    # clamp
-    return min(100, risk)
+    return min(100, int(risk))
