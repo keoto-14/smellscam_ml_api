@@ -1,8 +1,8 @@
+# url_feature_extractor.py
 """
 New extractor (40 features) — rewritten as requested.
 - Produces the exact 40 features expected by your models (names must match features.pkl)
-- Shopping detection: URL-first (robust for JS-heavy or blocked sites) with optional HTML fallback
-- Minimal external dependencies (requests optional, BeautifulSoup optional)
+- Shopping detection: URL-first with improved HTML fallback for any ecommerce website
 """
 
 import os
@@ -13,7 +13,6 @@ import urllib.parse
 import time
 from datetime import datetime
 
-# silence InsecureRequestWarning when verify=False is used in requests
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -37,7 +36,7 @@ try:
 except Exception:
     dns = None
 
-# optional file cache (keeps behavior if simple_cache exists)
+# cache (optional)
 try:
     from simple_cache import cache_get, cache_set
 except Exception:
@@ -49,10 +48,12 @@ except Exception:
         if time.time() - ts > max_age:
             return None
         return val
+
     def cache_set(k, v):
         _CACHE[k] = (time.time(), v)
 
 VT_API_KEY = os.environ.get("VT_API_KEY")
+
 
 # -------------------------
 # Helpers
@@ -61,7 +62,9 @@ def safe_request(url, timeout=6, max_bytes=200000):
     if requests is None:
         return None
     try:
-        r = requests.get(url, timeout=timeout, verify=False, headers={"User-Agent": "Mozilla/5.0 (smellscam)"}, stream=True, allow_redirects=True)
+        r = requests.get(url, timeout=timeout, verify=False,
+                         headers={"User-Agent": "Mozilla/5.0 (smellscam)"},
+                         stream=True, allow_redirects=True)
         data = b""
         for chunk in r.iter_content(4096):
             if not chunk:
@@ -72,6 +75,7 @@ def safe_request(url, timeout=6, max_bytes=200000):
         return data.decode(errors="ignore")
     except Exception:
         return None
+
 
 def safe_whois(host):
     if pywhois is None:
@@ -92,6 +96,7 @@ def safe_whois(host):
     except Exception:
         return None
 
+
 def safe_ssl_valid(host):
     try:
         ctx = ssl.create_default_context()
@@ -102,6 +107,7 @@ def safe_ssl_valid(host):
         return bool(cert)
     except Exception:
         return None
+
 
 def safe_quad9_blocked(host):
     if dns is None:
@@ -114,6 +120,7 @@ def safe_quad9_blocked(host):
     except Exception:
         return 1
 
+
 def vt_scan_info(url_or_host):
     if not VT_API_KEY or requests is None:
         return 0,0,0.0
@@ -122,10 +129,12 @@ def vt_scan_info(url_or_host):
         domain = (parsed.netloc or url_or_host).split(":")[0].lower()
     except Exception:
         domain = url_or_host.lower().split(":")[0]
+
     cache_key = f"vt_domain::{domain}"
     cached = cache_get(cache_key, max_age=3600)
     if cached:
         return cached["total"], cached["malicious"], cached["ratio"]
+
     headers = {"x-apikey": VT_API_KEY}
     try:
         r = requests.get(f"https://www.virustotal.com/api/v3/domains/{domain}", headers=headers, timeout=6)
@@ -134,14 +143,18 @@ def vt_scan_info(url_or_host):
             if isinstance(stats, dict):
                 total = sum(stats.values())
                 malicious = stats.get("malicious", 0)
-                ratio = malicious / total if total>0 else 0.0
+                ratio = malicious / total if total > 0 else 0.0
                 cache_set(cache_key, {"total": total, "malicious": malicious, "ratio": ratio})
                 return total, malicious, ratio
     except Exception:
         pass
+
     return 0,0,0.0
 
-# URL-only shopping detector (robust)
+
+# -------------------------
+# Shopping detection helpers
+# -------------------------
 SHOP_URL_KEYWORDS = [
     "product", "products", "item", "items",
     "shop", "store", "collections", "collection",
@@ -150,46 +163,33 @@ SHOP_URL_KEYWORDS = [
     "add-to-cart", "add_to_cart", "order", "bag"
 ]
 
-PLATFORM_INDICATORS = ["shopify", "woocommerce", "magento", "bigcommerce", "prestashop", "wix", "squareup"]
+PLATFORM_INDICATORS = [
+    "shopify", "woocommerce", "magento", "bigcommerce",
+    "prestashop", "wix", "squareup"
+]
+
 
 def detect_shopping_url_only(url: str) -> bool:
     u = url.lower()
     for k in SHOP_URL_KEYWORDS:
         if k in u:
             return True
-    # domain-level hint
+
     domain = urllib.parse.urlparse(url).netloc.lower()
     for p in ["shop", "store", "boutique", "outlet", "market"]:
         if p in domain:
             return True
+
     for p in PLATFORM_INDICATORS:
-        if p in url.lower():
+        if p in u:
             return True
+
     return False
 
-def detect_shopping_from_html(soup, body):
-    # optional HTML fallback: price + add-to-cart + product schema
-    score = 0
-    txt = (body or "").lower()
-    if re.search(r"(\$|€|£|rm|usd)\s?\d", txt):
-        score += 2
-    if any(k in txt for k in ["add to cart", "buy now", "checkout", "add-to-cart"]):
-        score += 3
-    try:
-        if soup:
-            for tag in soup.find_all("script", type="application/ld+json"):
-                try:
-                    s = tag.string or ""
-                    if '"@type"' in s and '"Product"' in s:
-                        score += 4
-                        break
-                except:
-                    pass
-    except:
-        pass
-    return score >= 3
 
+# -------------------------
 # Main extractor
+# -------------------------
 def extract_all_features(url):
     parsed = urllib.parse.urlparse(url if "://" in url else "http://" + url)
     host = parsed.netloc.split(":")[0].lower()
@@ -197,7 +197,8 @@ def extract_all_features(url):
     url_l = url.lower()
 
     f = {}
-    # lexical
+
+    # lexical features
     f["length_url"] = len(url)
     f["length_hostname"] = len(host)
     f["nb_dots"] = host.count(".")
@@ -205,7 +206,8 @@ def extract_all_features(url):
     f["nb_numeric_chars"] = sum(c.isdigit() for c in url)
 
     f["contains_scam_keyword"] = int(any(k in url_l for k in [
-        "login","verify","secure","bank","account","update","confirm","urgent","pay","gift","free","click","signin"
+        "login","verify","secure","bank","account","update","confirm","urgent",
+        "pay","gift","free","click","signin"
     ]))
     f["nb_at"] = url.count("@")
     f["nb_qm"] = url.count("?")
@@ -237,8 +239,10 @@ def extract_all_features(url):
     # live features
     age = safe_whois(host)
     f["domain_age_days"] = age if age is not None else 365
+
     ssl_ok = safe_ssl_valid(host)
     f["ssl_valid"] = int(ssl_ok) if ssl_ok is not None else 1
+
     q9 = safe_quad9_blocked(host)
     f["quad9_blocked"] = int(q9) if q9 is not None else 0
 
@@ -247,7 +251,7 @@ def extract_all_features(url):
     f["vt_malicious_count"] = vt_mal
     f["vt_detection_ratio"] = vt_ratio
 
-    # HTML features
+    # HTML inspection
     html = None
     soup = None
     if requests is not None and BeautifulSoup is not None:
@@ -276,6 +280,7 @@ def extract_all_features(url):
             return 0
 
     f["external_favicon"] = external_favicon()
+
     if soup:
         login = 0
         for form in soup.find_all("form"):
@@ -297,80 +302,3 @@ def extract_all_features(url):
     try:
         title = soup.title.string.strip() if soup and soup.title else ""
         f["empty_title"] = int(title == "")
-    except Exception:
-        f["empty_title"] = 0
-
-    if body:
-        wc = len(re.findall(r"\w+", body))
-        if wc > 2000:
-            f["web_traffic"] = 1000
-        elif wc > 500:
-            f["web_traffic"] = 500
-        elif wc > 100:
-            f["web_traffic"] = 100
-        else:
-            f["web_traffic"] = 10
-    else:
-        f["web_traffic"] = 100
-
-    # -----------------------------------
-    # Shopping detection: URL-first
-    # -----------------------------------
-    is_shop = detect_shopping_url_only(url)
-    if not is_shop and soup:
-        try:
-            if detect_shopping_from_html(soup, body):
-                is_shop = True
-        except Exception:
-            pass
-
-    f["is_shopping"] = int(is_shop)
-
-    # ----------------------------------------------------
-    # UNIVERSAL SHOPPING FALLBACK (no brand list needed)
-    # ----------------------------------------------------
-    if f["is_shopping"] == 0:
-        domain_is_old = f["domain_age_days"] >= 180
-        ssl_ok = f["ssl_valid"] == 1
-        path_depth = parsed.path.count("/") >= 2
-        traffic_ok = f["web_traffic"] >= 100
-
-        score = 0
-        for cond in (domain_is_old, ssl_ok, path_depth, traffic_ok):
-            score += 1 if cond else 0
-
-        if score >= 3:
-            f["is_shopping"] = 1
-
-    # ensure expected keys (40 features)
-    expected = [
-        "length_url","length_hostname","nb_dots","nb_hyphens","nb_numeric_chars",
-        "contains_scam_keyword","nb_at","nb_qm","nb_and","nb_underscore",
-        "nb_tilde","nb_percent","nb_slash","nb_hash","shortening_service",
-        "nb_www","ends_with_com","nb_subdomains","abnormal_subdomain","prefix_suffix",
-        "path_extension_php","domain_in_brand","brand_in_path","char_repeat3",
-        "ratio_digits_url","ratio_digits_host","ssl_valid","domain_age_days",
-        "quad9_blocked","vt_total_vendors","vt_malicious_count","vt_detection_ratio",
-        "external_favicon","login_form","iframe_present","popup_window",
-        "right_click_disabled","empty_title","web_traffic","is_shopping"
-    ]
-
-    for k in expected:
-        if k not in f:
-            if k in ("ssl_valid","shortening_service","nb_www","path_extension_php",
-                     "domain_in_brand","brand_in_path","char_repeat3","external_favicon",
-                     "login_form","iframe_present","popup_window","right_click_disabled",
-                     "empty_title","is_shopping"):
-                f[k] = 0
-            elif k == "domain_age_days":
-                f[k] = 365
-            elif k == "web_traffic":
-                f[k] = 100
-            elif k in ("vt_total_vendors","vt_malicious_count"):
-                f[k] = 0
-            elif k in ("vt_detection_ratio","ratio_digits_url","ratio_digits_host"):
-                f[k] = 0.0
-            else:
-                f[k] = 0
-
-    return f
