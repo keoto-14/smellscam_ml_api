@@ -256,4 +256,58 @@ def extract_all_features(url):
         if not soup:
             return 0
         try:
-            link = soup.find("link
+            link = soup.find("link", rel=re.compile("icon", re.I))
+            if not link:
+                return 0
+            href = link.get("href", "")
+            if href.startswith("data:"):
+                return 0
+            p = urllib.parse.urlparse(href if "://" in href else f"http://{host}{href}")
+            fav_host = p.netloc
+            return 0 if fav_host.endswith(host) else 1
+        except:
+            return 0
+
+    f["external_favicon"] = favicon_external()
+
+    # login form
+    f["login_form"] = 0
+    if soup:
+        for form in soup.find_all("form"):
+            inputs = [i.get("type","").lower() for i in form.find_all("input")]
+            if "password" in inputs:
+                f["login_form"] = 1
+                break
+
+    f["iframe_present"] = int(bool(soup and soup.find_all("iframe")))
+    f["popup_window"] = int("popup" in body.lower())
+    f["right_click_disabled"] = int("oncontextmenu" in (html or "").lower())
+    f["empty_title"] = int(not(soup and soup.title and soup.title.string))
+
+    # fake web traffic
+    wc = len(re.findall(r"\w+", body)) if body else 0
+    f["web_traffic"] = 1000 if wc > 2000 else 500 if wc > 500 else 100 if wc > 100 else 10
+
+    # improved shopping detection
+    f["is_shopping"] = int(detect_shopping(url, host, soup, body))
+
+    # ensure 40 fields exist
+    expected = [
+        "length_url","length_hostname","nb_dots","nb_hyphens","nb_numeric_chars",
+        "contains_scam_keyword","nb_at","nb_qm","nb_and","nb_underscore",
+        "nb_tilde","nb_percent","nb_slash","nb_hash","shortening_service",
+        "nb_www","ends_with_com","nb_subdomains","abnormal_subdomain",
+        "prefix_suffix","path_extension_php","domain_in_brand","brand_in_path",
+        "char_repeat3","ratio_digits_url","ratio_digits_host","ssl_valid",
+        "domain_age_days","quad9_blocked","vt_total_vendors",
+        "vt_malicious_count","vt_detection_ratio","external_favicon",
+        "login_form","iframe_present","popup_window","right_click_disabled",
+        "empty_title","web_traffic","is_shopping"
+    ]
+
+    for k in expected:
+        if k not in f:
+            # safe default
+            f[k] = 0
+
+    return f
