@@ -2,7 +2,7 @@
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
-from predictor import predictor_router, Predictor
+from predictor import  Predictor
 
 load_dotenv()
 
