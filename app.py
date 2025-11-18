@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from predictor_v3 import predictor_router
+from predictor import predictor_router
 
 app = FastAPI(
     title="SmellScam ML API",
