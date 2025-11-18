@@ -302,3 +302,90 @@ def extract_all_features(url):
     try:
         title = soup.title.string.strip() if soup and soup.title else ""
         f["empty_title"] = int(title == "")
+    except Exception:
+        f["empty_title"] = 0
+
+    if body:
+        wc = len(re.findall(r"\w+", body))
+        if wc > 2000:
+            f["web_traffic"] = 1000
+        elif wc > 500:
+            f["web_traffic"] = 500
+        elif wc > 100:
+            f["web_traffic"] = 100
+        else:
+            f["web_traffic"] = 10
+    else:
+        f["web_traffic"] = 100
+
+    # -----------------------------------------------------------
+    # IMPROVED SHOPPING DETECTION (for ALL ecommerce sites)
+    # -----------------------------------------------------------
+    is_shop = detect_shopping_url_only(url)
+
+    # Step 2 — Domain-level ecommerce platform detection
+    ecommerce_domains = [
+        "shop", "store", "boutique", "outlet", "market",
+        "shopify", "woocommerce", "magento", "bigcommerce",
+        "prestashop", "wix", "squareup"
+    ]
+    for p in ecommerce_domains:
+        if p in host:
+            is_shop = True
+
+    # Step 3 — HTML fallback: price tags, add-to-cart, product JSON
+    if not is_shop and soup:
+        try:
+            txt = body.lower()
+            has_price = bool(re.search(r"(rm|usd|\$|€|£)\s?\d", txt))
+            has_cart = any(kw in txt for kw in [
+                "add to cart", "add-to-cart", "buy now", "checkout", "cart"
+            ])
+
+            has_schema = False
+            for tag in soup.find_all("script", type="application/ld+json"):
+                s = tag.string or ""
+                if '"Product"' in s:
+                    has_schema = True
+                    break
+
+            if has_price or has_cart or has_schema:
+                is_shop = True
+
+        except Exception:
+            pass
+
+    f["is_shopping"] = int(is_shop)
+
+    # Ensure exactly 40 features
+    expected = [
+        "length_url","length_hostname","nb_dots","nb_hyphens","nb_numeric_chars",
+        "contains_scam_keyword","nb_at","nb_qm","nb_and","nb_underscore",
+        "nb_tilde","nb_percent","nb_slash","nb_hash","shortening_service",
+        "nb_www","ends_with_com","nb_subdomains","abnormal_subdomain","prefix_suffix",
+        "path_extension_php","domain_in_brand","brand_in_path","char_repeat3",
+        "ratio_digits_url","ratio_digits_host","ssl_valid","domain_age_days",
+        "quad9_blocked","vt_total_vendors","vt_malicious_count","vt_detection_ratio",
+        "external_favicon","login_form","iframe_present","popup_window",
+        "right_click_disabled","empty_title","web_traffic","is_shopping"
+    ]
+
+    for k in expected:
+        if k not in f:
+            if k in ("ssl_valid","shortening_service","nb_www","path_extension_php",
+                     "domain_in_brand","brand_in_path","char_repeat3","external_favicon",
+                     "login_form","iframe_present","popup_window","right_click_disabled",
+                     "empty_title","is_shopping"):
+                f[k] = 0
+            elif k == "domain_age_days":
+                f[k] = 365
+            elif k == "web_traffic":
+                f[k] = 100
+            elif k in ("vt_total_vendors","vt_malicious_count"):
+                f[k] = 0
+            elif k in ("vt_detection_ratio","ratio_digits_url","ratio_digits_host"):
+                f[k] = 0.0
+            else:
+                f[k] = 0
+
+    return f
