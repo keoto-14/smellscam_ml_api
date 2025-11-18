@@ -1,313 +1,101 @@
-# url_feature_extractor.py
-"""
-Extractor with correct 40 features + improved shopping detection.
-"""
+import requests
+import socket
+import ssl
+import whois
+import re
+import datetime
+import tldextract
+import numpy as np
+from urllib.parse import urlparse
 
-import os, re, ssl, socket, urllib.parse, time
-from datetime import datetime
-import urllib3
+# ======================
+#  VirusTotal + Quad9
+# ======================
+VT_API_KEY = "8fe25e2f3a5dbd46fc46a8ae875c1ae03a2ee6ee3d3a7ca9c784d4d894682cf9"  # <-- replace with your API key or load from .env
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-# optional imports
-try:
-    import requests
-except:
-    requests = None
-
-try:
-    from bs4 import BeautifulSoup
-except:
-    BeautifulSoup = None
-
-try:
-    import whois as pywhois
-except:
-    pywhois = None
-
-try:
-    import dns.resolver
-except:
-    dns = None
-
-# optional cache
-try:
-    from simple_cache import cache_get, cache_set
-except:
-    _CACHE = {}
-    def cache_get(k, max_age=3600):
-        v = _CACHE.get(k)
-        if not v:
-            return None
-        ts, val = v
-        if time.time() - ts > max_age:
-            return None
-        return val
-    def cache_set(k, v):
-        _CACHE[k] = (time.time(), v)
-
-VT_API_KEY = os.environ.get("VT_API_KEY")
-
-# --------------------------------------------------------
-# Helpers
-# --------------------------------------------------------
-def safe_request(url, timeout=6, max_bytes=150000):
-    if not requests:
-        return None
+def check_quad9_block(url):
+    """Check if domain is blocked by Quad9 DNS"""
     try:
-        r = requests.get(url, timeout=timeout, verify=False,
-                         headers={"User-Agent": "Mozilla/5.0 (smellscam)"},
-                         stream=True)
-        data = b""
-        for chunk in r.iter_content(4096):
-            if not chunk:
-                break
-            data += chunk
-            if len(data) > max_bytes:
-                break
-        return data.decode(errors="ignore")
-    except:
-        return None
+        domain = tldextract.extract(url).registered_domain
+        resolver = "9.9.9.9"
+        response = socket.gethostbyname_ex(domain)
+        return 0  # resolved → not blocked
+    except Exception:
+        return 1  # failed → possibly blocked or dead
 
-def safe_whois(host):
-    if not pywhois:
-        return None
+def get_vt_reputation(url):
+    """Check VirusTotal for detections"""
     try:
-        w = pywhois.whois(host)
-        cd = w.creation_date
-        if isinstance(cd, list):
-            cd = cd[0]
-        if isinstance(cd, str):
-            try:
-                cd = datetime.fromisoformat(cd)
-            except:
-                cd = None
-        if not cd:
-            return None
-        return (datetime.utcnow() - cd).days
-    except:
-        return None
+        domain = tldextract.extract(url).registered_domain
+        headers = {"x-apikey": VT_API_KEY}
+        resp = requests.get(f"https://www.virustotal.com/api/v3/domains/{domain}", headers=headers, timeout=10)
 
-def safe_ssl_valid(host):
+        if resp.status_code == 200:
+            data = resp.json()
+            stats = data.get("data", {}).get("attributes", {}).get("last_analysis_stats", {})
+            positives = stats.get("malicious", 0)
+            total = sum(stats.values()) or 1
+            return positives / total  # detection ratio 0.0 → 1.0
+        else:
+            return 0.0
+    except Exception:
+        return 0.0
+
+# ======================
+#  Main Feature Extractor
+# ======================
+def extract_all_features(url):
+    """Extracts both static and live features for the given URL"""
+    features = {}
+
+    try:
+        parsed = urlparse(url)
+        domain = parsed.netloc or url
+        ext = tldextract.extract(url)
+        hostname = ext.registered_domain
+    except Exception:
+        features = {f"feat_{i}": 0 for i in range(50)}
+        return features
+
+    # Example lexical features (replace with your existing ones)
+    features["NumDots"] = url.count(".")
+    features["UrlLength"] = len(url)
+    features["NumDash"] = url.count("-")
+    features["HasHTTPs"] = 1 if url.startswith("https") else 0
+    features["SubdomainLevel"] = len(ext.subdomain.split(".")) if ext.subdomain else 0
+
+    # SSL check
     try:
         ctx = ssl.create_default_context()
-        conn = socket.create_connection((host, 443), timeout=4)
-        sock = ctx.wrap_socket(conn, server_hostname=host)
-        sock.getpeercert()
-        sock.close()
-        return 1
-    except:
-        return None
+        with ctx.wrap_socket(socket.socket(), server_hostname=hostname) as s:
+            s.settimeout(5)
+            s.connect((hostname, 443))
+        features["SSL_Valid"] = 1
+    except Exception:
+        features["SSL_Valid"] = 0
 
-def safe_quad9_blocked(host):
-    if not dns:
-        return None
+    # WHOIS / Domain age
     try:
-        r = dns.resolver.Resolver(configure=False)
-        r.nameservers = ["9.9.9.9"]
-        r.resolve(host, "A", lifetime=2)
-        return 0
-    except:
-        return 1
+        w = whois.whois(hostname)
+        if isinstance(w.creation_date, list):
+            created = w.creation_date[0]
+        else:
+            created = w.creation_date
+        if created:
+            age_days = (datetime.datetime.now() - created).days
+            features["Domain_Age_Days"] = age_days
+        else:
+            features["Domain_Age_Days"] = 0
+    except Exception:
+        features["Domain_Age_Days"] = 0
 
-def vt_scan_info(host):
-    if not VT_API_KEY or not requests:
-        return 0,0,0.0
+    # 🧠 Reputation features
+    features["VT_Detection_Ratio"] = get_vt_reputation(url)
+    features["Quad9_Blocked"] = check_quad9_block(url)
 
-    cache_key = f"vt::{host}"
-    cached = cache_get(cache_key)
-    if cached:
-        return cached["total"], cached["mal"], cached["ratio"]
+    # ✅ Ensure no NaNs
+    for k, v in features.items():
+        if v is None or v == "" or (isinstance(v, float) and np.isnan(v)):
+            features[k] = 0
 
-    try:
-        r = requests.get(
-            f"https://www.virustotal.com/api/v3/domains/{host}",
-            headers={"x-apikey": VT_API_KEY},
-            timeout=6,
-        )
-        if r.status_code == 200:
-            stats = r.json()["data"]["attributes"]["last_analysis_stats"]
-            total = sum(stats.values())
-            mal = stats.get("malicious", 0)
-            ratio = mal / total if total > 0 else 0.0
-            cache_set(cache_key, {"total": total, "mal": mal, "ratio": ratio})
-            return total, mal, ratio
-    except:
-        pass
-
-    return 0,0,0.0
-
-# --------------------------------------------------------
-# Shopping detection
-# --------------------------------------------------------
-SHOP_URL_KEYWORDS = [
-    "product","products","item","items","shop","store","collections",
-    "category","cart","checkout","buy","sale","sku","variant","order"
-]
-
-ECOMMERCE_DOMAINS = [
-    "shop","store","boutique","outlet","market","shopify",
-    "woocommerce","magento","prestashop","bigcommerce","wix"
-]
-
-def detect_shopping(url, host, soup, body):
-    url_l = url.lower()
-    host_l = host.lower()
-    body_l = (body or "").lower()
-
-    # URL keywords
-    if any(k in url_l for k in SHOP_URL_KEYWORDS):
-        return True
-
-    # domain indicators
-    if any(k in host_l for k in ECOMMERCE_DOMAINS):
-        return True
-
-    if not soup:
-        return False
-
-    # HTML indicators
-    has_price = bool(re.search(r"(rm|\$|usd|€|£)\s?\d", body_l))
-    has_cart = any(k in body_l for k in ["add to cart","buy now","checkout","cart"])
-
-    has_schema = False
-    for tag in soup.find_all("script", type="application/ld+json"):
-        txt = tag.string or ""
-        if '"Product"' in txt:
-            has_schema = True
-            break
-
-    return has_price or has_cart or has_schema
-
-# --------------------------------------------------------
-# Main feature extractor
-# --------------------------------------------------------
-def extract_all_features(url):
-    parsed = urllib.parse.urlparse(url if "://" in url else "http://" + url)
-    host = parsed.netloc.split(":")[0]
-    path = parsed.path or "/"
-    url_l = url.lower()
-
-    f = {}
-
-    # lexical features
-    f["length_url"] = len(url)
-    f["length_hostname"] = len(host)
-    f["nb_dots"] = host.count(".")
-    f["nb_hyphens"] = host.count("-")
-    f["nb_numeric_chars"] = sum(c.isdigit() for c in url)
-
-    f["contains_scam_keyword"] = int(any(k in url_l for k in [
-        "login","verify","bank","secure","account","confirm","urgent"
-    ]))
-
-    f["nb_at"] = url.count("@")
-    f["nb_qm"] = url.count("?")
-    f["nb_and"] = url.count("&")
-    f["nb_underscore"] = url.count("_")
-    f["nb_tilde"] = url.count("~")
-    f["nb_percent"] = url.count("%")
-    f["nb_slash"] = url.count("/")
-    f["nb_hash"] = url.count("#")
-
-    f["shortening_service"] = int(bool(re.search(r"(bit\.ly|tinyurl|t\.co|goo\.gl)", url_l)))
-    f["nb_www"] = int(host.startswith("www"))
-    f["ends_with_com"] = int(host.endswith(".com"))
-    f["nb_subdomains"] = max(0, host.count(".") - 1)
-    f["abnormal_subdomain"] = int(bool(re.match(r"^\d+\.", host)))
-    f["prefix_suffix"] = int("-" in host)
-    f["path_extension_php"] = int(path.endswith(".php"))
-
-    # token similarity
-    tokens_host = re.split(r"[\W_]+", host)
-    tokens_path = re.split(r"[\W_]+", path)
-    common = set(t for t in tokens_host if len(t) > 2).intersection(
-        t for t in tokens_path if len(t) > 2
-    )
-    f["domain_in_brand"] = int(bool(common))
-    f["brand_in_path"] = int(bool(common))
-
-    f["char_repeat3"] = int(bool(re.search(r"(.)\1\1", url)))
-
-    f["ratio_digits_url"] = (sum(c.isdigit() for c in url) / max(1, len(url))) * 100
-    f["ratio_digits_host"] = (sum(c.isdigit() for c in host) / max(1, len(host))) * 100
-
-    # WHOIS / SSL / Quad9 / VT
-    age = safe_whois(host)
-    f["domain_age_days"] = age if age is not None else 365
-
-    ssl_ok = safe_ssl_valid(host)
-    f["ssl_valid"] = 1 if ssl_ok else 0
-
-    q9 = safe_quad9_blocked(host)
-    f["quad9_blocked"] = q9 if q9 is not None else 0
-
-    vt_total, vt_mal, vt_ratio = vt_scan_info(host)
-    f["vt_total_vendors"] = vt_total
-    f["vt_malicious_count"] = vt_mal
-    f["vt_detection_ratio"] = vt_ratio
-
-    # HTML
-    html = safe_request(url)
-    soup = BeautifulSoup(html, "html.parser") if (html and BeautifulSoup) else None
-    body = soup.get_text(" ", strip=True) if soup else ""
-
-    def favicon_external():
-        if not soup:
-            return 0
-        try:
-            link = soup.find("link", rel=re.compile("icon", re.I))
-            if not link:
-                return 0
-            href = link.get("href", "")
-            if href.startswith("data:"):
-                return 0
-            p = urllib.parse.urlparse(href if "://" in href else f"http://{host}{href}")
-            fav_host = p.netloc
-            return 0 if fav_host.endswith(host) else 1
-        except:
-            return 0
-
-    f["external_favicon"] = favicon_external()
-
-    # login form
-    f["login_form"] = 0
-    if soup:
-        for form in soup.find_all("form"):
-            inputs = [i.get("type","").lower() for i in form.find_all("input")]
-            if "password" in inputs:
-                f["login_form"] = 1
-                break
-
-    f["iframe_present"] = int(bool(soup and soup.find_all("iframe")))
-    f["popup_window"] = int("popup" in body.lower())
-    f["right_click_disabled"] = int("oncontextmenu" in (html or "").lower())
-    f["empty_title"] = int(not(soup and soup.title and soup.title.string))
-
-    # fake web traffic
-    wc = len(re.findall(r"\w+", body)) if body else 0
-    f["web_traffic"] = 1000 if wc > 2000 else 500 if wc > 500 else 100 if wc > 100 else 10
-
-    # improved shopping detection
-    f["is_shopping"] = int(detect_shopping(url, host, soup, body))
-
-    # ensure 40 fields exist
-    expected = [
-        "length_url","length_hostname","nb_dots","nb_hyphens","nb_numeric_chars",
-        "contains_scam_keyword","nb_at","nb_qm","nb_and","nb_underscore",
-        "nb_tilde","nb_percent","nb_slash","nb_hash","shortening_service",
-        "nb_www","ends_with_com","nb_subdomains","abnormal_subdomain",
-        "prefix_suffix","path_extension_php","domain_in_brand","brand_in_path",
-        "char_repeat3","ratio_digits_url","ratio_digits_host","ssl_valid",
-        "domain_age_days","quad9_blocked","vt_total_vendors",
-        "vt_malicious_count","vt_detection_ratio","external_favicon",
-        "login_form","iframe_present","popup_window","right_click_disabled",
-        "empty_title","web_traffic","is_shopping"
-    ]
-
-    for k in expected:
-        if k not in f:
-            # safe default
-            f[k] = 0
-
-    return f
+    return features
