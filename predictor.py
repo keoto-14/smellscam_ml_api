@@ -72,8 +72,6 @@ class Predictor:
         }
 
     # ------------------------------------------------
-    # Load ML Models
-    # ------------------------------------------------
     def load_models(self):
         if self.loaded:
             return
@@ -84,7 +82,6 @@ class Predictor:
             stk_path = os.path.join(MODEL_DIR, "stacker.pkl")
             feat_path= os.path.join(MODEL_DIR, "features.pkl")
 
-            # XGBoost loader
             from xgboost import XGBClassifier
             xgb_model = XGBClassifier()
             xgb_model.load_model(xgb_path)
@@ -104,8 +101,6 @@ class Predictor:
             logger.exception("Failed to load models")
             raise HTTPException(status_code=500, detail=str(e))
 
-    # ------------------------------------------------
-    # Google Safe Browsing
     # ------------------------------------------------
     async def check_gsb(self, url: str) -> bool:
         if not GSB_API_KEY:
@@ -131,8 +126,6 @@ class Predictor:
             return False
 
     # ------------------------------------------------
-    # VirusTotal domain scan
-    # ------------------------------------------------
     async def check_vt(self, domain: str):
         if not VT_API_KEY:
             return (0, 0, 0.0)
@@ -155,18 +148,41 @@ class Predictor:
             return (0, 0, 0.0)
 
     # ------------------------------------------------
-    # MAIN: Predict
-    # ------------------------------------------------
     async def predict_url(self, raw_url: str) -> dict:
-        # load ML models
         self.load_models()
 
-        # extract all 40 features
         feats = extract_all_features(raw_url)
-        is_shopping = bool(feats.get("is_shopping", 0))
+        extracted_is_shopping = bool(feats.get("is_shopping", 0))
+
+        # ----------------------------------------------------
+        # ---- SHOPPING FIX START (only change here) ----
+        # ----------------------------------------------------
+        url_lower = raw_url.lower()
+
+        DOMAIN = urllib.parse.urlparse(raw_url).netloc.split(":")[0].lower()
+
+        SHOPPING_DOMAINS = [
+            "shopee", "lazada", "amazon", "aliexpress", "ebay",
+            "tiktok", "shopify", "woocommerce", "etsy", "zalora",
+            "rakuten", "walmart"
+        ]
+
+        URL_KEYWORDS = [
+            "product", "products", "item", "cart", "checkout",
+            "shop", "store", "detail", "sku", "variant"
+        ]
+
+        fallback_is_shopping = (
+            any(d in DOMAIN for d in SHOPPING_DOMAINS) or
+            any(k in url_lower for k in URL_KEYWORDS)
+        )
+
+        is_shopping = extracted_is_shopping or fallback_is_shopping
+        # ----------------------------------------------------
+        # ---- SHOPPING FIX END ----
+        # ----------------------------------------------------
 
         if not is_shopping:
-            # shopping-only mode → block
             return {
                 "is_shopping": False,
                 "trust_score": 0,
@@ -175,10 +191,9 @@ class Predictor:
                 "model_probs": {"xgb": 0, "rf": 0, "ml_final": 0}
             }
 
-        # prepare ML feature vector
+        # ML features
         X = np.asarray([[float(feats.get(f, 0)) for f in self.feature_names]])
 
-        # Model outputs
         try:
             p_xgb = float(self.models["xgb"].predict_proba(X)[0][1])
         except:
@@ -189,7 +204,6 @@ class Predictor:
         except:
             p_rf = 0.5
 
-        # Blended meta-model
         try:
             p_final = float(self.models["stacker"].predict_proba([[p_xgb, p_rf]])[0][1])
         except:
@@ -197,20 +211,14 @@ class Predictor:
 
         ml_risk = p_final * 100
 
-        # parse domain
         domain = urllib.parse.urlparse(raw_url).netloc.split(":")[0]
 
-        # async checks
         gsb_match = await self.check_gsb(raw_url)
         vt_total, vt_mal, vt_ratio = await self.check_vt(domain)
 
-        # convert VT ratio into risk
         vt_risk = min((vt_ratio * 100) ** 2 / 100, 100)
-
-        # 0 or 100
         gsb_risk = 100 if gsb_match else 0
 
-        # weighted score
         FINAL_RISK = (
             ml_risk * self.weights["ml"] +
             vt_risk * self.weights["vt"] +
@@ -219,7 +227,6 @@ class Predictor:
 
         trust = max(0.0, min(100.0, 100 - FINAL_RISK))
 
-        # return final JSON
         return PredictResponse(
             is_shopping=True,
             trust_score=round(trust, 3),
@@ -238,12 +245,8 @@ class Predictor:
 
 
 # --------------------------------------------------
-# FastAPI Router
-# --------------------------------------------------
 router = APIRouter()
-
 predictor = Predictor()
-
 
 @router.post("/predict", response_model=PredictResponse)
 async def predict(req: PredictRequest):
@@ -252,6 +255,5 @@ async def predict(req: PredictRequest):
     except Exception as e:
         logger.exception("Prediction failed")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 predictor_router = router
