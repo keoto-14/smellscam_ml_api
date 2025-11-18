@@ -1,35 +1,24 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from predictor import Predictor
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from predictor_v3 import predictor_router
 
 app = FastAPI(
     title="SmellScam ML API",
-    version="3.0",
-    description="Hybrid ML + VirusTotal + GSB trust-score engine"
+    description="Hybrid ML + VT + GSB with strict shopping-only filtering",
+    version="3.0"
 )
 
-# Load predictor once on startup
-_predictor = Predictor()
-
-
-class URLRequest(BaseModel):
-    url: str
-
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.get("/")
-def root():
-    return {"status": "ok", "message": "SmellScam ML API running"}
+async def root():
+    return {"message": "SmellScam ML API running", "version": "3.0"}
 
-
-@app.post("/api/v1/predict")
-async def predict_url(req: URLRequest):
-    url = req.url.strip()
-
-    if not url:
-        raise HTTPException(status_code=400, detail="URL is required")
-
-    try:
-        result = await _predictor.predict_url(url)
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+# mount router
+app.include_router(predictor_router, prefix="/api/v1")
