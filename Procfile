@@ -1,1 +1,1 @@
-web: uvicorn app:app --host 0.0.0.0 --port $PORT
+CMD ["gunicorn", "-b", "0.0.0.0:8080", "app:app"]
