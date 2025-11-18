@@ -18,8 +18,8 @@ beautifulsoup4==4.12.3
 dnspython==2.6.1
 python-whois==0.8.0
 
-# Cache library (correct name)
-simple-cache==0.1.0
+# Modern cache library
+cachetools==5.4.0
 
-# Database driver
+# MySQL
 mysql-connector-python==8.3.0
