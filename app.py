@@ -1,19 +1,17 @@
-from fastapi import FastAPI, HTTPException
+# app.py
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from predictor import predictor_router, Predictor
 from dotenv import load_dotenv
+from predictor import predictor_router, Predictor
 
 load_dotenv()
 
 app = FastAPI(
     title="SmellScam ML API",
-    description="Hybrid ML + VirusTotal + GSB + Heuristics",
-    version="4.0"
+    description="Hybrid ML + VirusTotal + Google Safe Browsing + Heuristics (Enterprise)",
+    version="5.0"
 )
 
-# ------------------------------------------------------
-# CORS
-# ------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,31 +19,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ------------------------------------------------------
-# Root
-# ------------------------------------------------------
-@app.get("/")
-async def root():
-    return {
-        "message": "SmellScam ML API Running",
-        "version": "4.0",
-        "status": "ok"
-    }
-
-# ------------------------------------------------------
-# Mount predictor router
-# ------------------------------------------------------
+# mount the main router
 app.include_router(predictor_router, prefix="/api/v1")
 
-# ------------------------------------------------------
-# Backwards-compatible legacy endpoint
-# POST /predict  → same as /api/v1/predict
-# ------------------------------------------------------
-predictor = Predictor()
+# single Predictor instance for legacy endpoint
+_predictor = Predictor()
 
+@app.get("/")
+async def root():
+    return {"message": "SmellScam ML API Running", "version": "5.0"}
+
+# Backwards-compatible legacy endpoint (accepts JSON body {"url": "..."} )
 @app.post("/predict")
-async def legacy_predict(req: dict):
-    if "url" not in req:
-        raise HTTPException(400, "Missing field: url")
-
-    return await predictor.predict(req["url"])
+async def legacy_predict(req: Request):
+    try:
+        body = await req.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    url = body.get("url")
+    if not url:
+        raise HTTPException(status_code=400, detail="Missing 'url' field")
+    return await _predictor.predict_url(url)
