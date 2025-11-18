@@ -3,6 +3,7 @@ from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 import logging
 import traceback
+import asyncio
 
 load_dotenv()
 
@@ -24,10 +25,6 @@ def root():
 
 @app.route("/predict", methods=["POST"])
 def predict():
-    """
-    Accepts JSON body: { "url": "<target url>" }
-    Uses request.get_json(force=True) to avoid 415 errors when client doesn't set Content-Type properly.
-    """
     try:
         body = request.get_json(force=True)
     except Exception:
@@ -41,17 +38,25 @@ def predict():
         return jsonify({"detail": "Missing 'url' field"}), 400
 
     try:
-        result = _predictor.predict_url(url)
-        # predictor returns a dict / pydantic-like serializable structure
+        # Flask cannot handle async → must use asyncio.run
+        result = asyncio.run(_predictor.predict_url(url))
         return jsonify(result)
+
     except ModelLoadError as e:
         logger.exception("Model load error")
         return jsonify({"detail": str(e)}), 500
+
     except Exception as e:
         logger.exception("Unhandled error in /predict")
         traceback.print_exc()
         return jsonify({"detail": "prediction failed", "error": str(e)}), 500
 
+
+# Optional: Keep old FastAPI path
+@app.route("/api/v1/predict", methods=["POST"])
+def predict_v1():
+    return predict()
+
+
 if __name__ == "__main__":
-    # development server (not for production)
     app.run(host="0.0.0.0", port=int(__import__("os").environ.get("PORT", 8080)))
