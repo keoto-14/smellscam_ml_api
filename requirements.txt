@@ -1,19 +1,25 @@
 flask==3.0.3
 Flask-Cors==4.0.0
-gunicorn
-python-dotenv
+gunicorn==23.0.0
+python-dotenv==1.0.1
 
-joblib
-numpy
-pandas
-scikit-learn
-xgboost
-imblearn
+# ML + Data
+joblib==1.4.2
+numpy==1.26.4
+pandas==2.2.2
+scikit-learn==1.5.1
+xgboost==2.1.0
+imbalanced-learn==0.12.3
 
-tldextract
-requests
-beautifulsoup4
-dnspython
-python-whois
+# URL + Web Parsing + DNS
+tldextract==5.1.1
+requests==2.32.3
+beautifulsoup4==4.12.3
+dnspython==2.6.1
+python-whois==0.8.0
 
-simple_cache
+# Caching
+simple_cache==0.4.2
+
+# ⭐ Required for database connection (your missing dependency)
+mysql-connector-python==8.3.0
