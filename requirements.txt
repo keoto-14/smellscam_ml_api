@@ -4,7 +4,7 @@ beautifulsoup4
 python-whois
 python-dotenv
 dnspython
-xgboost
+xgboost==1.6.2
 scikit-learn
 numpy
 urllib3
