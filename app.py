@@ -35,33 +35,41 @@ models = load_models()
 def root():
     return jsonify({"message": "SmellScam ML API (Flask) is running!"})
 
-# ---------------------------------------------
-# 2) Predict Route
-# ---------------------------------------------
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
         data = request.get_json(force=True)
         url = (data.get("url") or "").strip()
+        user_id = data.get("user_id")  # <— receives from PHP
+
         if not url:
             return jsonify({"error": "Missing 'url'"}), 400
 
         feats = extract_all_features(url)
         result = predict_from_features(feats, models, raw_url=url)
+        trust = result.get("trust_score")
 
-        # save scan result into database
-        try:
-            db = get_db()
-            cursor = db.cursor()
-            cursor.execute(
-                """
-                INSERT INTO scan_results (user_id, shopping_url, trust_score, scanned_at)
-                VALUES (%s, %s, %s, NOW())
-                """,
-                (data.get("user_id") or None, url, result.get("trust_score"))
-            )
-        except Exception as db_err:
-            print("DB Insert Error:", db_err)
+        # ⭐ Only insert into DB if USER is logged in
+        if user_id:
+            try:
+                db = get_db()
+                cursor = db.cursor()
+
+                cursor.execute("""
+                    INSERT INTO scan_results (user_id, shopping_url, trust_score, scanned_at)
+                    VALUES (%s, %s, %s, NOW())
+                """, (user_id, url, trust))
+
+                db.commit()
+                cursor.close()
+                db.close()
+
+                print("Saved scan result for user:", user_id)
+
+            except Exception as db_err:
+                print("DB INSERT ERROR:", db_err)
+        else:
+            print("Guest user → Scan NOT saved to database.")
 
         return jsonify({
             "url": url,
@@ -72,7 +80,6 @@ def predict():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
-
 
 # ---------------------------------------------
 # 3) Simple Route (text body)
