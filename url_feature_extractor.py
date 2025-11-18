@@ -1,4 +1,3 @@
-# url_feature_extractor.py
 """
 New extractor (40 features) — rewritten as requested.
 - Produces the exact 40 features expected by your models (names must match features.pkl)
@@ -248,7 +247,7 @@ def extract_all_features(url):
     f["vt_malicious_count"] = vt_mal
     f["vt_detection_ratio"] = vt_ratio
 
-    # HTML features: best-effort, but not required for detection
+    # HTML features
     html = None
     soup = None
     if requests is not None and BeautifulSoup is not None:
@@ -314,19 +313,34 @@ def extract_all_features(url):
     else:
         f["web_traffic"] = 100
 
-    # shopping detection:
-    # 1) URL-only (primary, robust)
-    # 2) If URL-only fails, optional HTML-based fallback (helps if URL lacks obvious keywords)
+    # -----------------------------------
+    # Shopping detection: URL-first
+    # -----------------------------------
     is_shop = detect_shopping_url_only(url)
     if not is_shop and soup:
-        # try HTML fallback
         try:
             if detect_shopping_from_html(soup, body):
                 is_shop = True
         except Exception:
-            is_shop = is_shop
+            pass
 
     f["is_shopping"] = int(is_shop)
+
+    # ----------------------------------------------------
+    # UNIVERSAL SHOPPING FALLBACK (no brand list needed)
+    # ----------------------------------------------------
+    if f["is_shopping"] == 0:
+        domain_is_old = f["domain_age_days"] >= 180
+        ssl_ok = f["ssl_valid"] == 1
+        path_depth = parsed.path.count("/") >= 2
+        traffic_ok = f["web_traffic"] >= 100
+
+        score = 0
+        for cond in (domain_is_old, ssl_ok, path_depth, traffic_ok):
+            score += 1 if cond else 0
+
+        if score >= 3:
+            f["is_shopping"] = 1
 
     # ensure expected keys (40 features)
     expected = [
@@ -343,7 +357,6 @@ def extract_all_features(url):
 
     for k in expected:
         if k not in f:
-            # set safe defaults consistent with previous implementation
             if k in ("ssl_valid","shortening_service","nb_www","path_extension_php",
                      "domain_in_brand","brand_in_path","char_repeat3","external_favicon",
                      "login_form","iframe_present","popup_window","right_click_disabled",
