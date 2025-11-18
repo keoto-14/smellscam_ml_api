@@ -1,42 +1,35 @@
-# app.py
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from dotenv import load_dotenv
-from predictor import  Predictor
-
-load_dotenv()
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from predictor import Predictor
 
 app = FastAPI(
     title="SmellScam ML API",
-    description="Hybrid ML + VirusTotal + Google Safe Browsing + Heuristics (Enterprise)",
-    version="5.0"
+    version="3.0",
+    description="Hybrid ML + VirusTotal + GSB trust-score engine"
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# mount the main router
-app.include_router(predictor_router, prefix="/api/v1")
-
-# single Predictor instance for legacy endpoint
+# Load predictor once on startup
 _predictor = Predictor()
 
-@app.get("/")
-async def root():
-    return {"message": "SmellScam ML API Running", "version": "5.0"}
 
-# Backwards-compatible legacy endpoint (accepts JSON body {"url": "..."} )
-@app.post("/predict")
-async def legacy_predict(req: Request):
-    try:
-        body = await req.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON body")
-    url = body.get("url")
+class URLRequest(BaseModel):
+    url: str
+
+
+@app.get("/")
+def root():
+    return {"status": "ok", "message": "SmellScam ML API running"}
+
+
+@app.post("/api/v1/predict")
+async def predict_url(req: URLRequest):
+    url = req.url.strip()
+
     if not url:
-        raise HTTPException(status_code=400, detail="Missing 'url' field")
-    return await _predictor.predict_url(url)
+        raise HTTPException(status_code=400, detail="URL is required")
+
+    try:
+        result = await _predictor.predict_url(url)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
