@@ -14,9 +14,9 @@ from url_feature_extractor import extract_all_features
 app = Flask(__name__)
 CORS(app)
 
-# ---------------------------------------------
-# 1) Connect to MySQL (same DB used by your PHP)
-# ---------------------------------------------
+# ------------------------------------------------------------------
+# 1) MySQL DB Connection
+# ------------------------------------------------------------------
 def get_db():
     return mysql.connector.connect(
         host=os.getenv("DB_HOST"),
@@ -26,21 +26,25 @@ def get_db():
         autocommit=True
     )
 
-# ---------------------------------------------
-# Load ML models on startup
-# ---------------------------------------------
+# ------------------------------------------------------------------
+# Load ML models at startup
+# ------------------------------------------------------------------
 models = load_models()
 
 @app.route("/", methods=["GET"])
 def root():
     return jsonify({"message": "SmellScam ML API (Flask) is running!"})
 
+# ------------------------------------------------------------------
+# 2) PREDICT + optional DB insert
+# ------------------------------------------------------------------
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
         data = request.get_json(force=True)
+
         url = (data.get("url") or "").strip()
-        user_id = data.get("user_id")  # <— receives from PHP
+        user_id = data.get("user_id")  # sent only when logged in
 
         if not url:
             return jsonify({"error": "Missing 'url'"}), 400
@@ -49,7 +53,7 @@ def predict():
         result = predict_from_features(feats, models, raw_url=url)
         trust = result.get("trust_score")
 
-        # ⭐ Only insert into DB if USER is logged in
+        # ⭐ Insert only for logged-in users
         if user_id:
             try:
                 db = get_db()
@@ -60,16 +64,14 @@ def predict():
                     VALUES (%s, %s, %s, NOW())
                 """, (user_id, url, trust))
 
-                db.commit()
                 cursor.close()
                 db.close()
-
                 print("Saved scan result for user:", user_id)
 
             except Exception as db_err:
                 print("DB INSERT ERROR:", db_err)
         else:
-            print("Guest user → Scan NOT saved to database.")
+            print("Guest user → NOT inserted into database.")
 
         return jsonify({
             "url": url,
@@ -81,9 +83,9 @@ def predict():
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
-# ---------------------------------------------
-# 3) Simple Route (text body)
-# ---------------------------------------------
+# ------------------------------------------------------------------
+# 3) Simple route
+# ------------------------------------------------------------------
 @app.route("/simple", methods=["POST"])
 def simple():
     try:
@@ -100,16 +102,15 @@ def simple():
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
-
-# ---------------------------------------------
-# 4) Debug Route
-# ---------------------------------------------
+# ------------------------------------------------------------------
+# 4) Debug
+# ------------------------------------------------------------------
 @app.route("/debug", methods=["GET"])
 def debug():
     try:
         url = (request.args.get("url") or "").strip()
         if not url:
-            return jsonify({"error": "Missing 'url' parameter"}), 400
+            return jsonify({"error": "Missing 'url'"}), 400
 
         feats = extract_all_features(url)
         result = predict_from_features(feats, models, raw_url=url)
@@ -124,64 +125,46 @@ def debug():
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
-
-# ---------------------------------------------
-# 5) NEW — /history route
-# ---------------------------------------------
+# ------------------------------------------------------------------
+# 5) /history
+# ------------------------------------------------------------------
 @app.route("/history", methods=["GET"])
 def history():
     try:
-        user_id = request.args.get("user_id")  # optional
-
+        user_id = request.args.get("user_id")
         db = get_db()
         cursor = db.cursor(dictionary=True)
 
         if user_id:
-            cursor.execute(
-                """
-                SELECT id, shopping_url, trust_score, scanned_at 
-                FROM scan_results 
-                WHERE user_id = %s 
+            cursor.execute("""
+                SELECT id, shopping_url, trust_score, scanned_at
+                FROM scan_results
+                WHERE user_id = %s
                 ORDER BY scanned_at DESC
-                """,
-                (user_id,)
-            )
+            """, (user_id,))
         else:
-            cursor.execute(
-                """
-                SELECT id, shopping_url, trust_score, scanned_at 
-                FROM scan_results 
+            cursor.execute("""
+                SELECT id, shopping_url, trust_score, scanned_at
+                FROM scan_results
                 ORDER BY scanned_at DESC
-                """
-            )
+            """)
 
         rows = cursor.fetchall()
-
-        return jsonify({
-            "count": len(rows),
-            "history": rows
-        })
+        return jsonify({"count": len(rows), "history": rows})
 
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
-# ---------------------------------------------
-# 6) NEW — /scan_results route (full history)
-# ---------------------------------------------
+# ------------------------------------------------------------------
+# 6) /scan_results (full table)
+# ------------------------------------------------------------------
 @app.route("/scan_results", methods=["GET"])
 def scan_results():
-    """
-    Return full scan results table.
-    Optional filters:
-       /scan_results?user_id=3
-       /scan_results?limit=20
-       /scan_results?order=asc
-    """
     try:
         user_id = request.args.get("user_id")
-        limit = request.args.get("limit")
-        order = request.args.get("order", "desc").lower()
+        limit  = request.args.get("limit")
+        order  = request.args.get("order", "desc").lower()
 
         if order not in ["asc", "desc"]:
             order = "desc"
@@ -189,40 +172,30 @@ def scan_results():
         db = get_db()
         cursor = db.cursor(dictionary=True)
 
-        base_query = """
-            SELECT id, user_id, shopping_url, trust_score, scanned_at
-            FROM scan_results
-        """
-
+        query = "SELECT id, user_id, shopping_url, trust_score, scanned_at FROM scan_results"
         params = []
 
-        # Optional user filter
         if user_id:
-            base_query += " WHERE user_id = %s"
+            query += " WHERE user_id = %s"
             params.append(user_id)
 
-        # Sorting
-        base_query += f" ORDER BY scanned_at {order.upper()}"
+        query += f" ORDER BY scanned_at {order.upper()}"
 
-        # Limit
         if limit and limit.isdigit():
-            base_query += f" LIMIT {limit}"
+            query += f" LIMIT {limit}"
 
-        cursor.execute(base_query, tuple(params))
+        cursor.execute(query, tuple(params))
         rows = cursor.fetchall()
 
-        return jsonify({
-            "count": len(rows),
-            "results": rows
-        })
+        return jsonify({"count": len(rows), "results": rows})
 
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
-# ---------------------------------------------
+# ------------------------------------------------------------------
 # Run server
-# ---------------------------------------------
+# ------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
