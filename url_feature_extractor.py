@@ -1,13 +1,4 @@
 # url_feature_extractor.py
-"""
-Optimized 40-feature universal extractor for SmellScam.
-Includes:
- - TRAIN_MODE lightweight mode
- - Full LIVE mode with caching
- - Suppressed SSL warnings
- - Resilient network calls
-"""
-
 import os
 import re
 import time
@@ -16,7 +7,6 @@ import ssl
 import urllib.parse
 from datetime import datetime
 
-# disable HTTPS warnings from verify=False
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -24,39 +14,43 @@ TRAIN_MODE = os.environ.get("TRAIN_MODE", "0") == "1"
 VT_API_KEY = os.environ.get("VT_API_KEY")
 GSB_API_KEY = os.environ.get("GSB_API_KEY")
 
-# optional libs
 try:
     import requests
-except: requests = None
+except:
+    requests = None
 
 try:
     from bs4 import BeautifulSoup
-except: BeautifulSoup = None
+except:
+    BeautifulSoup = None
 
 try:
     import whois as pywhois
-except: pywhois = None
+except:
+    pywhois = None
 
 try:
     import dns.resolver
-except: dns = None
+except:
+    dns = None
 
-# caching
 try:
     from simple_cache import cache_get, cache_set
 except:
     _CACHE = {}
     def cache_get(k, max_age=3600):
         v = _CACHE.get(k)
-        if not v: return None
+        if not v:
+            return None
         ts, val = v
-        if time.time() - ts > max_age: return None
+        if time.time() - ts > max_age:
+            return None
         return val
-    def cache_set(k, v): _CACHE[k] = (time.time(), v)
 
-# ----------------------------------------------------
-# Utility: safe GET with retries
-# ----------------------------------------------------
+    def cache_set(k, v):
+        _CACHE[k] = (time.time(), v)
+
+
 def safe_request(url, timeout=5, verify=False, max_bytes=150000):
     if not requests:
         return None
@@ -80,9 +74,12 @@ def safe_whois(host):
     try:
         w = pywhois.whois(host)
         cd = w.creation_date
-        if isinstance(cd, list): cd = cd[0]
-        if isinstance(cd, str): cd = datetime.fromisoformat(cd)
-        if not cd: return None
+        if isinstance(cd, list):
+            cd = cd[0]
+        if isinstance(cd, str):
+            cd = datetime.fromisoformat(cd)
+        if not cd:
+            return None
         return max(0, (datetime.utcnow() - cd).days)
     except:
         return None
@@ -92,8 +89,8 @@ def safe_ssl_valid(host):
     try:
         ctx = ssl.create_default_context()
         with socket.create_connection((host, 443), timeout=4) as s:
-            with ctx.wrap_socket(s, server_hostname=host) as ssl_sock:
-                return bool(ssl_sock.getpeercert())
+            with ctx.wrap_socket(s, server_hostname=host) as sock:
+                return bool(sock.getpeercert())
     except:
         return None
 
@@ -111,13 +108,12 @@ def safe_quad9_blocked(host):
 
 
 def vt_domain_info(url_or_host):
-    """Return (total, mal, ratio) with caching."""
     if not VT_API_KEY or not requests:
         return 0, 0, 0.0
-
-    # derive domain
     try:
-        p = urllib.parse.urlparse(url_or_host if "://" in url_or_host else "http://" + url_or_host)
+        p = urllib.parse.urlparse(
+            url_or_host if "://" in url_or_host else "http://" + url_or_host
+        )
         domain = (p.netloc or url_or_host).split(":")[0].lower()
     except:
         domain = url_or_host.lower()
@@ -160,14 +156,8 @@ def extract_host(url):
     host = (p.netloc or "").split(":")[0].lower()
     return p, host
 
-# ----------------------------------------------------
-# MAIN: 40-feature extractor
-# ----------------------------------------------------
+
 def extract_all_features(url):
-    """
-    Extract exactly 40 production features + url.
-    Fully compatible with predictor.py and features.pkl.
-    """
     u = str(url).strip()
     parsed, host = extract_host(u)
     path = parsed.path or "/"
@@ -175,9 +165,6 @@ def extract_all_features(url):
 
     features = {}
 
-    # ------------------------
-    # Lexical features
-    -------------------------
     features["length_url"] = len(u)
     features["length_hostname"] = len(host)
     features["nb_dots"] = host.count(".")
@@ -210,7 +197,6 @@ def extract_all_features(url):
     features["prefix_suffix"] = int("-" in host)
     features["path_extension_php"] = int(path.endswith(".php"))
 
-    # domainpath alignment
     tokens_host = re.split(r"[\W_]+", host)
     tokens_path = re.split(r"[\W_]+", path)
     common = set(t for t in tokens_host if len(t) > 2).intersection(
@@ -224,9 +210,6 @@ def extract_all_features(url):
     features["ratio_digits_url"] = (sum(c.isdigit() for c in u) / max(1, len(u))) * 100
     features["ratio_digits_host"] = (sum(c.isdigit() for c in host) / max(1, len(host))) * 100
 
-    # ------------------------
-    # TRAIN MODE
-    # ------------------------
     if TRAIN_MODE:
         features.update({
             "ssl_valid": 1,
@@ -235,7 +218,6 @@ def extract_all_features(url):
             "vt_total_vendors": 0,
             "vt_malicious_count": 0,
             "vt_detection_ratio": 0.0,
-
             "external_favicon": 0,
             "login_form": 0,
             "iframe_present": 0,
@@ -247,33 +229,23 @@ def extract_all_features(url):
         features["url"] = u
         return features
 
-    # ------------------------
-    # LIVE FEATURES
-    # ------------------------
-
-    # WHOIS
     age = safe_whois(host)
     features["domain_age_days"] = age if age is not None else 365
 
-    # SSL validity
     ssl_ok = safe_ssl_valid(host)
     features["ssl_valid"] = int(ssl_ok) if ssl_ok is not None else 1
 
-    # Quad9
     q9 = safe_quad9_blocked(host)
     features["quad9_blocked"] = int(q9) if q9 is not None else 0
 
-    # VirusTotal
     vt_total, vt_mal, vt_ratio = vt_domain_info(u)
     features["vt_total_vendors"] = vt_total
     features["vt_malicious_count"] = vt_mal
     features["vt_detection_ratio"] = vt_ratio
 
-    # HTML & DOM features
     html = safe_request(u, verify=False)
     soup = BeautifulSoup(html, "html.parser") if (BeautifulSoup and html) else None
 
-    # favicon
     try:
         if soup:
             link = soup.find("link", rel=re.compile(".*icon.*", re.I))
@@ -294,9 +266,7 @@ def extract_all_features(url):
     except:
         features["external_favicon"] = 0
 
-    # loginform, iframe, popup, contextmenu, title, traffic
     if soup:
-        # login
         login = 0
         for f in soup.find_all("form"):
             inputs = [i.get("type", "").lower() for i in f.find_all("input")]
@@ -311,6 +281,7 @@ def extract_all_features(url):
         features["popup_window"] = int(any(
             k in body for k in ["popup", "modal", "overlay", "subscribe", "cookie"]
         ))
+
         features["right_click_disabled"] = int("oncontextmenu" in (html or "").lower())
 
         try:
@@ -320,10 +291,14 @@ def extract_all_features(url):
             features["empty_title"] = 0
 
         wc = len(re.findall(r"\w+", body))
-        if wc > 2000: features["web_traffic"] = 1000
-        elif wc > 500: features["web_traffic"] = 500
-        elif wc > 100: features["web_traffic"] = 100
-        else: features["web_traffic"] = 10
+        if wc > 2000:
+            features["web_traffic"] = 1000
+        elif wc > 500:
+            features["web_traffic"] = 500
+        elif wc > 100:
+            features["web_traffic"] = 100
+        else:
+            features["web_traffic"] = 10
     else:
         features.update({
             "login_form": 0,
@@ -334,9 +309,6 @@ def extract_all_features(url):
             "web_traffic": 100,
         })
 
-    # ------------------------
-    # Ensure strict 40 features
-    # ------------------------
     expected = [
         "length_url","length_hostname","nb_dots","nb_hyphens","nb_numeric_chars",
         "contains_scam_keyword","nb_at","nb_qm","nb_and","nb_underscore",
