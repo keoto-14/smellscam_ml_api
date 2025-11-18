@@ -9,3 +9,5 @@ scikit-learn
 numpy
 urllib3
 gunicorn
+setuptools
+xgboost==1.7.6
