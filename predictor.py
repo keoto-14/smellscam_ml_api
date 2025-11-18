@@ -129,8 +129,8 @@ def load_xgb_model(path: str):
 # Predictor class
 # ----------------------------
 class Predictor:
-    def __init__(self, model_dir: str = MODEL_DIR):
-        self.model_dir = model_dir
+    def __init__(self, MODEL_DIR: str = MODEL_DIR):
+        self.model_dir = MODEL_DIR
         self.models: Dict[str, Any] = {}
         self.feature_names = []
         self._loaded = False
