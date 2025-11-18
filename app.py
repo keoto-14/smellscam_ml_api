@@ -1,22 +1,12 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Form
 from fastapi.middleware.cors import CORSMiddleware
-from dotenv import load_dotenv
-
-# Load .env variables
-load_dotenv()
-
-# Predictor router (new API)
-from predictor import predictor_router, _predictor, PredictRequest, PredictResponse
+from predictor import predictor_router, Predictor
 
 app = FastAPI(
     title="SmellScam ML API",
-    description="Hybrid ML + VirusTotal + Google Safe Browsing + Heuristics",
-    version="3.0"
+    version="3.1"
 )
 
-# ------------------------------------------------------
-# CORS
-# ------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -24,29 +14,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ------------------------------------------------------
-# Root endpoint
-# ------------------------------------------------------
 @app.get("/")
 async def root():
-    return {"message": "SmellScam ML API Running", "version": "3.0"}
+    return {"message": "SmellScam ML API Running", "version": "3.1"}
 
-
-# ------------------------------------------------------
-# NEW ENDPOINT
-# /api/v1/predict
-# ------------------------------------------------------
+# Main ML API
 app.include_router(predictor_router, prefix="/api/v1")
 
-
-# ------------------------------------------------------
-# LEGACY ENDPOINT (for PHP frontend)
-# POST /predict
-# ------------------------------------------------------
-@app.post("/predict", response_model=PredictResponse)
-async def legacy_predict(req: PredictRequest):
-    """
-    Legacy endpoint so old PHP files work without updates.
-    Fully identical behavior to /api/v1/predict.
-    """
-    return await _predictor.predict_url(req.url)
+# Legacy PHP fix — accepts form POST without JSON (fixes 415 fully)
+@app.post("/legacy_predict")
+async def legacy_predict(url: str = Form(...)):
+    predictor = Predictor()
+    return await predictor.predict_url(url)
