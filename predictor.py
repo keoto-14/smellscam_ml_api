@@ -1,223 +1,211 @@
+# predictor.py
 from __future__ import annotations
 import os
 import pickle
 import urllib.parse
 import logging
-import asyncio
+import math
+import time
+
 import numpy as np
-import httpx
+import requests
 
-from pydantic import BaseModel, Field
-from fastapi import APIRouter, HTTPException
+from typing import Dict, Any, Tuple
 
+# import extractor
 from url_feature_extractor import extract_all_features
 
-# --------------------------------------------------
-# Logging
-# --------------------------------------------------
+# suppress sklearn warnings when importing (optional)
+import warnings
+from sklearn.exceptions import DataConversionWarning
+warnings.filterwarnings("ignore", category=DataConversionWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
+
 logger = logging.getLogger("smellscam.predictor")
 logger.setLevel(logging.INFO)
+if not logger.handlers:
+    ch = logging.StreamHandler()
+    ch.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logger.addHandler(ch)
 
-# --------------------------------------------------
-# ENV
-# --------------------------------------------------
 MODEL_DIR = os.environ.get("MODEL_DIR", "models")
 GSB_API_KEY = os.environ.get("GSB_API_KEY")
-VT_API_KEY  = os.environ.get("VT_API_KEY")
+VT_API_KEY = os.environ.get("VT_API_KEY")
 
-# --------------------------------------------------
-# Pydantic Models
-# --------------------------------------------------
-class PredictRequest(BaseModel):
-    url: str = Field(...)
+# optional file-backed simple cache if available in project
+try:
+    from simple_cache import cache_get, cache_set
+except Exception:
+    _CACHE = {}
+    def cache_get(k, max_age=3600):
+        v = _CACHE.get(k)
+        if not v: return None
+        ts, val = v
+        if time.time() - ts > max_age:
+            return None
+        return val
+    def cache_set(k, v):
+        _CACHE[k] = (time.time(), v)
 
-class VTInfo(BaseModel):
-    total_vendors: int
-    malicious: int
-    ratio: float
 
-class ModelProbs(BaseModel):
-    xgb: float
-    rf: float
-    ml_final: float
+class ModelLoadError(Exception):
+    pass
 
-class PredictResponse(BaseModel):
-    is_shopping: bool
-    trust_score: float
-    gsb_match: bool
-    vt: VTInfo
-    model_probs: ModelProbs
 
-# --------------------------------------------------
-# Helper – load pickle safely
-# --------------------------------------------------
-def load_pickle(path):
+def load_pickle(path: str):
     with open(path, "rb") as f:
         return pickle.load(f)
 
-# --------------------------------------------------
-# Predictor Class
-# --------------------------------------------------
+
+def load_xgb_model(path: str):
+    try:
+        from xgboost import XGBClassifier
+    except Exception as e:
+        raise RuntimeError("xgboost not installed") from e
+    model = XGBClassifier()
+    model.load_model(path)
+    return model
+
+
 class Predictor:
     def __init__(self):
-        self.models = {}
+        self.models: Dict[str, Any] = {}
         self.feature_names = []
-        self.loaded = False
+        self._loaded = False
+        # weights specified by user (ml=50, vt=45, gsb=5)
+        self.weights = {"ml": 0.50, "vt": 0.45, "gsb": 0.05}
 
-        # weighting strategy (shopping-only)
-        self.weights = {
-            "ml": 0.50,
-            "vt": 0.45,
-            "gsb": 0.05
-        }
-
-    # ------------------------------------------------
     def load_models(self):
-        if self.loaded:
+        if self._loaded:
             return
-
         try:
             xgb_path = os.path.join(MODEL_DIR, "xgb.json")
-            rf_path  = os.path.join(MODEL_DIR, "rf.pkl")
-            stk_path = os.path.join(MODEL_DIR, "stacker.pkl")
-            feat_path= os.path.join(MODEL_DIR, "features.pkl")
+            rf_path = os.path.join(MODEL_DIR, "rf.pkl")
+            stacker_path = os.path.join(MODEL_DIR, "stacker.pkl")
+            features_path = os.path.join(MODEL_DIR, "features.pkl")
 
-            from xgboost import XGBClassifier
-            xgb_model = XGBClassifier()
-            xgb_model.load_model(xgb_path)
+            xgb = load_xgb_model(xgb_path)
+            rf = load_pickle(rf_path)
+            stacker = load_pickle(stacker_path)
+            features = load_pickle(features_path)
 
-            self.models = {
-                "xgb": xgb_model,
-                "rf": load_pickle(rf_path),
-                "stacker": load_pickle(stk_path),
-                "features": load_pickle(feat_path)
-            }
+            # ensure features is list-like
+            if not isinstance(features, (list, tuple)):
+                raise ModelLoadError("features.pkl must be a list of feature names")
 
-            self.feature_names = list(self.models["features"])
-            self.loaded = True
-            logger.info("Models loaded successfully.")
-
+            self.models = {"xgb": xgb, "rf": rf, "stacker": stacker, "features": features}
+            self.feature_names = list(features)
+            self._loaded = True
+            logger.info("Models loaded successfully. Features count=%d", len(self.feature_names))
+        except FileNotFoundError as e:
+            logger.exception("Model file not found")
+            raise ModelLoadError(str(e))
         except Exception as e:
-            logger.exception("Failed to load models")
-            raise HTTPException(status_code=500, detail=str(e))
+            logger.exception("Error loading models")
+            raise ModelLoadError(str(e))
 
-    # ------------------------------------------------
-    async def check_gsb(self, url: str) -> bool:
+    # ---------------- Google Safe Browsing (synchronous) ----------------
+    def check_gsb(self, url: str) -> bool:
         if not GSB_API_KEY:
             return False
-
+        cache_key = f"gsb::{url}"
+        cached = cache_get(cache_key)
+        if cached is not None:
+            return bool(cached)
         endpoint = f"https://safebrowsing.googleapis.com/v4/threatMatches:find?key={GSB_API_KEY}"
         body = {
             "client": {"clientId": "smellscam", "clientVersion": "1.0"},
             "threatInfo": {
-                "threatTypes": ["MALWARE", "SOCIAL_ENGINEERING"],
+                "threatTypes": ["MALWARE", "SOCIAL_ENGINEERING", "UNWANTED_SOFTWARE"],
                 "platformTypes": ["ANY_PLATFORM"],
                 "threatEntryTypes": ["URL"],
                 "threatEntries": [{"url": url}],
             },
         }
-
         try:
-            async with httpx.AsyncClient(timeout=5) as client:
-                r = await client.post(endpoint, json=body)
-                r.raise_for_status()
-                return bool(r.json().get("matches"))
-        except:
+            r = requests.post(endpoint, json=body, timeout=6)
+            r.raise_for_status()
+            matches = bool(r.json().get("matches"))
+            cache_set(cache_key, matches)
+            return matches
+        except Exception:
             return False
 
-    # ------------------------------------------------
-    async def check_vt(self, domain: str):
+    # ---------------- VirusTotal domain report (synchronous) ----------------
+    def vt_domain_report(self, domain: str) -> Tuple[int, int, float]:
         if not VT_API_KEY:
-            return (0, 0, 0.0)
-
-        url = f"https://www.virustotal.com/api/v3/domains/{domain}"
-        headers = {"x-apikey": VT_API_KEY}
-
+            return 0, 0, 0.0
+        cache_key = f"vt::{domain}"
+        cached = cache_get(cache_key)
+        if cached:
+            return cached["total"], cached["mal"], cached["ratio"]
         try:
-            async with httpx.AsyncClient(timeout=6) as client:
-                r = await client.get(url, headers=headers)
-                if r.status_code != 200:
-                    return (0, 0, 0.0)
+            headers = {"x-apikey": VT_API_KEY}
+            url = f"https://www.virustotal.com/api/v3/domains/{domain}"
+            r = requests.get(url, headers=headers, timeout=6)
+            r.raise_for_status()
+            stats = r.json().get("data", {}).get("attributes", {}).get("last_analysis_stats", {})
+            total = sum(stats.values()) if stats else 0
+            mal = stats.get("malicious", 0) if stats else 0
+            ratio = mal / total if total > 0 else 0.0
+            cache_set(cache_key, {"total": total, "mal": mal, "ratio": ratio})
+            return total, mal, ratio
+        except Exception:
+            return 0, 0, 0.0
 
-                stats = r.json().get("data", {}).get("attributes", {}).get("last_analysis_stats", {})
-                total = sum(stats.values())
-                mal   = stats.get("malicious", 0)
-                ratio = mal / total if total > 0 else 0.0
-                return (total, mal, ratio)
-        except:
-            return (0, 0, 0.0)
-
-    # ------------------------------------------------
-    async def predict_url(self, raw_url: str) -> dict:
+    # ---------------- Main prediction (synchronous) ----------------
+    def predict_url(self, raw_url: str) -> Dict[str, Any]:
+        # ensure models loaded
         self.load_models()
 
+        # extract features (40 features)
         feats = extract_all_features(raw_url)
-        extracted_is_shopping = bool(feats.get("is_shopping", 0))
-
-        # ----------------------------------------------------
-        # ---- SHOPPING FIX START (only change here) ----
-        # ----------------------------------------------------
-        url_lower = raw_url.lower()
-
-        DOMAIN = urllib.parse.urlparse(raw_url).netloc.split(":")[0].lower()
-
-        SHOPPING_DOMAINS = [
-            "shopee", "lazada", "amazon", "aliexpress", "ebay",
-            "tiktok", "shopify", "woocommerce", "etsy", "zalora",
-            "rakuten", "walmart"
-        ]
-
-        URL_KEYWORDS = [
-            "product", "products", "item", "cart", "checkout",
-            "shop", "store", "detail", "sku", "variant"
-        ]
-
-        fallback_is_shopping = (
-            any(d in DOMAIN for d in SHOPPING_DOMAINS) or
-            any(k in url_lower for k in URL_KEYWORDS)
-        )
-
-        is_shopping = extracted_is_shopping or fallback_is_shopping
-        # ----------------------------------------------------
-        # ---- SHOPPING FIX END ----
-        # ----------------------------------------------------
+        is_shopping = bool(feats.get("is_shopping", 0))
 
         if not is_shopping:
+            # shopping-only mode: return explicit not-shopping response
             return {
                 "is_shopping": False,
-                "trust_score": 0,
+                "trust_score": 0.0,
                 "gsb_match": False,
-                "vt": {"total_vendors": 0, "malicious": 0, "ratio": 0},
-                "model_probs": {"xgb": 0, "rf": 0, "ml_final": 0}
+                "vt": {"total_vendors": 0, "malicious": 0, "ratio": 0.0},
+                "model_probs": {"xgb": 0.0, "rf": 0.0, "ml_final": 0.0},
             }
 
-        # ML features
-        X = np.asarray([[float(feats.get(f, 0)) for f in self.feature_names]])
+        # build numeric vector ordered by features.pkl
+        X = np.asarray([[float(feats.get(f, 0.0)) for f in self.feature_names]], dtype=float)
 
+        # model probabilities with safe fallbacks
         try:
             p_xgb = float(self.models["xgb"].predict_proba(X)[0][1])
-        except:
+        except Exception:
             p_xgb = 0.5
 
         try:
             p_rf = float(self.models["rf"].predict_proba(X)[0][1])
-        except:
+        except Exception:
             p_rf = 0.5
 
+        # stacked meta-model
         try:
-            p_final = float(self.models["stacker"].predict_proba([[p_xgb, p_rf]])[0][1])
-        except:
-            p_final = (p_xgb + p_rf) / 2
+            stack_in = np.asarray([[p_xgb, p_rf]], dtype=float)
+            p_final = float(self.models["stacker"].predict_proba(stack_in)[0][1])
+        except Exception:
+            p_final = (p_xgb + p_rf) / 2.0
 
-        ml_risk = p_final * 100
+        ml_risk = p_final * 100.0
 
-        domain = urllib.parse.urlparse(raw_url).netloc.split(":")[0]
+        # domain parsing
+        parsed = urllib.parse.urlparse(raw_url)
+        domain = parsed.netloc.lower().split(":")[0]
 
-        gsb_match = await self.check_gsb(raw_url)
-        vt_total, vt_mal, vt_ratio = await self.check_vt(domain)
+        # external checks (synchronous)
+        gsb_match = self.check_gsb(raw_url)
+        vt_total, vt_mal, vt_ratio = self.vt_domain_report(domain)
 
-        vt_risk = min((vt_ratio * 100) ** 2 / 100, 100)
-        gsb_risk = 100 if gsb_match else 0
+        vt_risk = min(((vt_ratio * 100.0) ** 2) / 100.0, 100.0)
+        gsb_risk = 100.0 if gsb_match else 0.0
 
         FINAL_RISK = (
             ml_risk * self.weights["ml"] +
@@ -225,35 +213,15 @@ class Predictor:
             gsb_risk * self.weights["gsb"]
         )
 
-        trust = max(0.0, min(100.0, 100 - FINAL_RISK))
+        FINAL_RISK = max(0.0, min(FINAL_RISK, 100.0))
+        trust = round(max(0.0, min(100.0, 100.0 - FINAL_RISK)), 3)
 
-        return PredictResponse(
-            is_shopping=True,
-            trust_score=round(trust, 3),
-            gsb_match=bool(gsb_match),
-            vt=VTInfo(
-                total_vendors=vt_total,
-                malicious=vt_mal,
-                ratio=vt_ratio
-            ),
-            model_probs=ModelProbs(
-                xgb=p_xgb,
-                rf=p_rf,
-                ml_final=p_final
-            )
-        ).dict()
-
-
-# --------------------------------------------------
-router = APIRouter()
-predictor = Predictor()
-
-@router.post("/predict", response_model=PredictResponse)
-async def predict(req: PredictRequest):
-    try:
-        return await predictor.predict_url(req.url)
-    except Exception as e:
-        logger.exception("Prediction failed")
-        raise HTTPException(status_code=500, detail=str(e))
-
-predictor_router = router
+        # final result matching the JSON schema user requested
+        result = {
+            "is_shopping": True,
+            "trust_score": trust,
+            "gsb_match": bool(gsb_match),
+            "vt": {"total_vendors": int(vt_total), "malicious": int(vt_mal), "ratio": float(vt_ratio)},
+            "model_probs": {"xgb": float(p_xgb), "rf": float(p_rf), "ml_final": float(p_final)},
+        }
+        return result
