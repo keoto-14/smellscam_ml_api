@@ -4,10 +4,9 @@ beautifulsoup4
 python-whois
 python-dotenv
 dnspython
-xgboost==1.6.2
+xgboost==1.7.6
 scikit-learn
 numpy
 urllib3
 gunicorn
 setuptools
-xgboost==1.7.6
