@@ -56,7 +56,7 @@ class Predictor:
 
         # Adjusted weights for FAST MODE (no VT/GSB)
         if FAST_MODE:
-            self.weights = {"ml": 0.90, "vt": 0.0, "gsb": 0.0}
+            self.weights = {"ml": 0.35, "vt": 0.65, "gsb": 0.0}
         else:
             self.weights = {"ml": 0.35, "vt": 0.60, "gsb": 0.05}
 
