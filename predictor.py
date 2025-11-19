@@ -67,8 +67,8 @@ class Predictor:
 
         # default weights (can change via env)
         self.weights = {
-            "ml": float(os.getenv("ML_WEIGHT", 0.35)),
-            "vt": float(os.getenv("VT_WEIGHT", 0.60)),
+            "ml": float(os.getenv("ML_WEIGHT", 0.60)),
+            "vt": float(os.getenv("VT_WEIGHT", 0.35)),
             "gsb": float(os.getenv("GSB_WEIGHT", 0.05)),
         }
 
@@ -229,6 +229,17 @@ class Predictor:
         score = max(0.05, min(score, 2.5))
         return score / 2.5
 
+    # -------- stable pseudo-random trust score --------
+    def stable_random(self, key: str, min_v: int, max_v: int) -> int:
+        """Return stable pseudo-random integer based on URL/domain.
+        Deterministic: same key -> same number.
+        """
+        if not key:
+            key = "default"
+        # Use a stable hash and reduce to range
+        base = abs(hash(key)) % 1000000
+        return min_v + (base % (max_v - min_v + 1))
+
     # ------------------ predict from features -----------------------
     def predict_from_features(self, feats: dict, models_obj=None, raw_url: str = None) -> Dict[str, Any]:
         """
@@ -294,9 +305,92 @@ class Predictor:
         # live component
         live_component = float(self._live_component(feats))
 
+        # ------------------ OVERRIDES (stable random ranges & rules) ------------------
+        stable_key = domain or raw_url
+
+        # 1) GSB override (immediate PHISHING)
+        if gsb_hit:
+            logger.info("GSB override: marking PHISHING (url=%s)", raw_url)
+            # small fixed low trust score to indicate severe issue
+            score = 2
+            return {
+                "trust_score": score,
+                "label": "PHISHING",
+                "override": "gsb",
+                "model_probs": {"xgb": p_xgb, "rf": p_rf, "ml_final": p_final},
+                "vt": {"total_vendors": vt_total, "malicious": vt_mal, "ratio": vt_ratio},
+                "gsb_match": True,
+                "live_component": round(live_component, 4),
+                "weights": {"ml": self.weights.get("ml"), "vt": self.weights.get("vt"), "gsb": self.weights.get("gsb"), "leftover": max(0.0, 1.0 - sum(self.weights.values()))}
+            }
+
+        # 2) VT malicious vendors mapping:
+        #    vt_mal >= 6  -> PHISHING (trust 1-49)
+        if vt_mal >= 6:
+            score = self.stable_random(stable_key, 1, 49)
+            logger.info("VT severe malicious override (domain=%s mal=%d) score=%d", domain, vt_mal, score)
+            return {
+                "trust_score": score,
+                "label": "PHISHING",
+                "override": "vt_malicious",
+                "model_probs": {"xgb": p_xgb, "rf": p_rf, "ml_final": p_final},
+                "vt": {"total_vendors": vt_total, "malicious": vt_mal, "ratio": vt_ratio},
+                "gsb_match": gsb_hit,
+                "live_component": round(live_component, 4),
+                "weights": {"ml": self.weights.get("ml"), "vt": self.weights.get("vt"), "gsb": self.weights.get("gsb"), "leftover": max(0.0, 1.0 - sum(self.weights.values()))}
+            }
+
+        # 3) VT 1..5 malicious -> SUSPICIOUS (trust 50-69)
+        if 1 <= vt_mal <= 5:
+            score = self.stable_random(stable_key, 50, 69)
+            logger.info("VT suspicious vendors (domain=%s mal=%d) score=%d", domain, vt_mal, score)
+            return {
+                "trust_score": score,
+                "label": "SUSPICIOUS",
+                "override": "vt_suspicious",
+                "model_probs": {"xgb": p_xgb, "rf": p_rf, "ml_final": p_final},
+                "vt": {"total_vendors": vt_total, "malicious": vt_mal, "ratio": vt_ratio},
+                "gsb_match": gsb_hit,
+                "live_component": round(live_component, 4),
+                "weights": {"ml": self.weights.get("ml"), "vt": self.weights.get("vt"), "gsb": self.weights.get("gsb"), "leftover": max(0.0, 1.0 - sum(self.weights.values()))}
+            }
+
+        # 4) VT zero malicious vendors -> use ML/VT agreement rules
+        # CASE 1: ML says legit and VT shows 0 malicious -> high legit (90-100)
+        if ml_component > 0.65 and vt_mal == 0:
+            score = self.stable_random(stable_key, 90, 100)
+            logger.info("ML & VT agree legit (domain=%s) score=%d", domain, score)
+            return {
+                "trust_score": score,
+                "label": "LEGITIMATE",
+                "override": "ml_vt_agree",
+                "model_probs": {"xgb": p_xgb, "rf": p_rf, "ml_final": p_final},
+                "vt": {"total_vendors": vt_total, "malicious": vt_mal, "ratio": vt_ratio},
+                "gsb_match": gsb_hit,
+                "live_component": round(live_component, 4),
+                "weights": {"ml": self.weights.get("ml"), "vt": self.weights.get("vt"), "gsb": self.weights.get("gsb"), "leftover": max(0.0, 1.0 - sum(self.weights.values()))}
+            }
+
+        # CASE 2: ML says phishing but VT has 0 malicious -> let VT (secondary) override ML
+        if ml_component < 0.5 and vt_mal == 0:
+            score = self.stable_random(stable_key, 70, 89)
+            label = "LEGITIMATE" if score >= 70 else "SUSPICIOUS"
+            logger.info("VT overrides ML (domain=%s) score=%d label=%s", domain, score, label)
+            return {
+                "trust_score": score,
+                "label": label,
+                "override": "vt_overrides_ml",
+                "model_probs": {"xgb": p_xgb, "rf": p_rf, "ml_final": p_final},
+                "vt": {"total_vendors": vt_total, "malicious": vt_mal, "ratio": vt_ratio},
+                "gsb_match": gsb_hit,
+                "live_component": round(live_component, 4),
+                "weights": {"ml": self.weights.get("ml"), "vt": self.weights.get("vt"), "gsb": self.weights.get("gsb"), "leftover": max(0.0, 1.0 - sum(self.weights.values()))}
+            }
+
+        # ---------------- If none of the overrides fired, fallback to weighted combine ----------------
         # weights (ml, vt, gsb) from self.weights, leftover goes to live
-        w_ml = self.weights.get("ml", 0.35)
-        w_vt = self.weights.get("vt", 0.6)
+        w_ml = self.weights.get("ml", 0.60)
+        w_vt = self.weights.get("vt", 0.35)
         w_gsb = self.weights.get("gsb", 0.05)
         leftover = max(0.0, 1.0 - (w_ml + w_vt + w_gsb))
 
@@ -309,11 +403,11 @@ class Predictor:
         combined = min(max(combined, 0.0), 1.0)
         trust_score = round(combined * 100.0, 2)
 
-        # ---------------- Overrides: strong external signals ----------------
-        # If GSB hits or VT strongly malicious => force PHISHING with low trust
-        # VT threshold: at least 3 distinct vendors flagged AND ratio above a small threshold
+        # ---------------- Overrides: strong external signals kept as extra safety ----------------
+        # Note: we've implemented VT/GSB overrides above according to your requested rules.
+        # Keep a small extra GSB safety net (shouldn't be reached because we returned earlier when gsb_hit).
         if gsb_hit:
-            logger.info("GSB override: marking PHISHING (url=%s)", raw_url)
+            logger.info("GSB (late) override: marking PHISHING (url=%s)", raw_url)
             return {
                 "trust_score": 2.0,
                 "label": "PHISHING",
@@ -321,20 +415,6 @@ class Predictor:
                 "model_probs": {"xgb": p_xgb, "rf": p_rf, "ml_final": p_final},
                 "vt": {"total_vendors": vt_total, "malicious": vt_mal, "ratio": vt_ratio},
                 "gsb_match": True,
-                "live_component": round(live_component, 4),
-                "weights": {"ml": w_ml, "vt": w_vt, "gsb": w_gsb, "leftover": leftover}
-            }
-
-        if vt_total >= 3 and vt_mal >= 2 and vt_ratio > 0.15:
-            logger.info("VT override: marking PHISHING (domain=%s total=%d mal=%d ratio=%.3f)",
-                        domain, vt_total, vt_mal, vt_ratio)
-            return {
-                "trust_score": 3.0,
-                "label": "PHISHING",
-                "override": "vt",
-                "model_probs": {"xgb": p_xgb, "rf": p_rf, "ml_final": p_final},
-                "vt": {"total_vendors": vt_total, "malicious": vt_mal, "ratio": vt_ratio},
-                "gsb_match": False,
                 "live_component": round(live_component, 4),
                 "weights": {"ml": w_ml, "vt": w_vt, "gsb": w_gsb, "leftover": leftover}
             }
