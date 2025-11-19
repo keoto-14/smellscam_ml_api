@@ -1,7 +1,6 @@
-# ==============================
-# url_feature_extractor.py
-# Improved 2025 Version
-# ==============================
+# ==============================================================
+# Railway-Optimized url_feature_extractor.py (FAST, NON-BLOCKING)
+# ==============================================================
 
 import os
 import re
@@ -14,11 +13,16 @@ import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# Modes
 TRAIN_MODE = os.environ.get("TRAIN_MODE", "0") == "1"
+FAST_MODE = os.environ.get("FAST_MODE", "0") == "1"   # <--- IMPORTANT FOR RAILWAY
+
 VT_API_KEY = os.environ.get("VT_API_KEY")
 GSB_API_KEY = os.environ.get("GSB_API_KEY")
 
-# --- Optional imports ---------------------------------------------------------
+# -----------------------------------------------------------
+# Optional imports
+# -----------------------------------------------------------
 try:
     import requests
 except:
@@ -39,51 +43,50 @@ try:
 except:
     dns = None
 
-# --- Fallback cache -----------------------------------------------------------
-try:
-    from simple_cache import cache_get, cache_set
-except:
-    _CACHE = {}
+# -----------------------------------------------------------
+# Simple in-memory cache
+# -----------------------------------------------------------
+_CACHE = {}
 
-    def cache_get(k, max_age=3600):
-        v = _CACHE.get(k)
-        if not v:
-            return None
-        ts, val = v
-        return val if time.time() - ts <= max_age else None
+def cache_get(k, max_age=3600):
+    v = _CACHE.get(k)
+    if not v:
+        return None
+    ts, val = v
+    return val if (time.time() - ts) <= max_age else None
 
-    def cache_set(k, v):
-        _CACHE[k] = (time.time(), v)
+def cache_set(k, v):
+    _CACHE[k] = (time.time(), v)
 
 
-# =============================================================================
-# SAFE REQUEST
-# =============================================================================
-def safe_request(url, timeout=5, verify=False, max_bytes=150000):
+# =============================================================
+# SAFE REQUEST (short timeout)
+# =============================================================
+def safe_request(url, timeout=2, verify=False, max_bytes=120000):
     if not requests:
         return None
-
-    for _ in range(2):
-        try:
-            r = requests.get(
-                url,
-                timeout=timeout,
-                verify=verify,
-                headers={"User-Agent": "Mozilla/5.0 SmellScam"}
-            )
-            return r.content[:max_bytes].decode(errors="ignore")
-        except:
-            time.sleep(0.2)
-
-    return None
+    try:
+        r = requests.get(
+            url,
+            timeout=timeout,
+            verify=verify,
+            headers={"User-Agent": "Mozilla/5.0 SmellScam"}
+        )
+        return r.content[:max_bytes].decode(errors="ignore")
+    except:
+        return None
 
 
-# =============================================================================
-# WHOIS
-# =============================================================================
+# =============================================================
+# WHOIS (short timeout, safe)
+# =============================================================
 def safe_whois(host):
+    if FAST_MODE:
+        return 365  # pretend domain age is normal
+
     if not pywhois:
         return None
+
     try:
         w = pywhois.whois(host)
         cd = w.creation_date
@@ -96,38 +99,47 @@ def safe_whois(host):
     return None
 
 
-# =============================================================================
-# SSL CHECK
-# =============================================================================
+# =============================================================
+# SSL CHECK (VERY short timeout)
+# =============================================================
 def safe_ssl_valid(host):
+    if FAST_MODE:
+        return 1
+
     try:
         ctx = ssl.create_default_context()
-        with socket.create_connection((host, 443), timeout=4) as s:
+        with socket.create_connection((host, 443), timeout=1.5) as s:
             with ctx.wrap_socket(s, server_hostname=host) as sock:
                 return bool(sock.getpeercert())
     except:
         return None
 
 
-# =============================================================================
-# QUAD9 DNS
-# =============================================================================
+# =============================================================
+# QUAD9 DNS (short lifetime)
+# =============================================================
 def safe_quad9_blocked(host):
+    if FAST_MODE:
+        return 0
+
     if not dns:
         return None
     try:
         r = dns.resolver.Resolver(configure=False)
         r.nameservers = ["9.9.9.9"]
-        r.resolve(host, "A", lifetime=3)
+        r.resolve(host, "A", lifetime=1.5)
         return 0
     except:
         return 1
 
 
-# =============================================================================
-# VirusTotal
-# =============================================================================
+# =============================================================
+# VIRUSTOTAL (short timeout)
+# =============================================================
 def vt_domain_info(url_or_host):
+    if FAST_MODE:
+        return 0, 0, 0.0
+
     if not VT_API_KEY or not requests:
         return 0, 0, 0.0
 
@@ -148,7 +160,7 @@ def vt_domain_info(url_or_host):
         r = requests.get(
             f"https://www.virustotal.com/api/v3/domains/{domain}",
             headers={"x-apikey": VT_API_KEY},
-            timeout=6
+            timeout=2
         )
         if r.status_code == 200:
             stats = (
@@ -163,13 +175,12 @@ def vt_domain_info(url_or_host):
     except:
         pass
 
-    cache_set(cache_key, {"total": 0, "mal": 0, "ratio": 0.0})
     return 0, 0, 0.0
 
 
-# =============================================================================
+# =============================================================
 # URL Parsing
-# =============================================================================
+# =============================================================
 def extract_host(url):
     parsed = urllib.parse.urlparse(
         url if "://" in url else "http://" + url
@@ -178,9 +189,9 @@ def extract_host(url):
     return parsed, host
 
 
-# =============================================================================
-# MAIN FEATURE EXTRACTOR
-# =============================================================================
+# =============================================================
+# MAIN FEATURE EXTRACTION
+# =============================================================
 def extract_all_features(url):
     u = str(url).strip()
     parsed, host = extract_host(u)
@@ -189,21 +200,20 @@ def extract_all_features(url):
 
     features = {}
 
-    # ===============================================================
+    # ===============================================
     # BASIC FEATURES
-    # ===============================================================
+    # ===============================================
     features["length_url"] = len(u)
     features["length_hostname"] = len(host)
     features["nb_dots"] = host.count(".")
     features["nb_hyphens"] = host.count("-")
     features["nb_numeric_chars"] = sum(c.isdigit() for c in u)
 
-    features["contains_scam_keyword"] = int(
-        any(k in url_l for k in [
-            "login", "verify", "secure", "bank", "account", "update", "confirm",
-            "urgent", "pay", "gift", "free", "click", "signin", "auth"
-        ])
-    )
+    scam_words = [
+        "login","verify","secure","bank","account","update","confirm",
+        "urgent","pay","gift","free","click","signin","auth"
+    ]
+    features["contains_scam_keyword"] = int(any(k in url_l for k in scam_words))
 
     # symbols
     for sym, name in [
@@ -218,7 +228,6 @@ def extract_all_features(url):
     ]:
         features[name] = u.count(sym)
 
-    # URL structure
     features["shortening_service"] = int(bool(re.search(
         r"(bit\.ly|tinyurl|goo\.gl|t\.co|ow\.ly|is\.gd|buff\.ly)", url_l
     )))
@@ -242,26 +251,22 @@ def extract_all_features(url):
     features["ratio_digits_url"] = (sum(c.isdigit() for c in u) / max(1, len(u))) * 100
     features["ratio_digits_host"] = (sum(c.isdigit() for c in host) / max(1, len(host))) * 100
 
-    # ===============================================================
-    # NEW FEATURES (added by you)
-    # ===============================================================
+    # ===============================================
+    # NEW FEATURES (your custom)
+    # ===============================================
     tld = host.split(".")[-1]
     suspicious_tlds = {
-        "top", "cfd", "xyz", "cyou", "shop", "win", "vip", "asia", "click",
-        "online", "support", "live", "rest", "gq", "ml", "tk", "ru"
+        "top","cfd","xyz","cyou","shop","win","vip","asia",
+        "click","online","support","rest","gq","ml","tk","ru"
     }
     features["suspicious_tld"] = int(tld in suspicious_tlds)
 
-    # brand impersonation
     known_brands = [
-        "paypal", "bank", "coinbase", "apple", "google", "microsoft", "meta",
-        "asics", "dhl", "fedex", "post", "facebook", "instagram", "amazon"
+        "paypal","bank","coinbase","apple","google","microsoft","meta",
+        "asics","dhl","fedex","post","facebook","instagram","amazon"
     ]
-    features["brand_mismatch"] = int(
-        any(b in url_l and b not in host for b in known_brands)
-    )
+    features["brand_mismatch"] = int(any(b in url_l and b not in host for b in known_brands))
 
-    # subdomain abuse
     features["double_hyphen"] = int("--" in host)
     features["subdomain_count"] = host.count(".")
     features["suspicious_subdomain"] = int(features["subdomain_count"] >= 3)
@@ -274,21 +279,23 @@ def extract_all_features(url):
 
     features["entropy_url"] = shannon_entropy(u) if len(u) > 0 else 0
 
-    # free hosting
-    free_hosts = ["webflow.io", "wixsite.com", "weebly.com", "000webhost", "shopify"]
+    free_hosts = [
+        "webflow.io","wixsite.com","weebly.com","000webhostapp.com",
+        "000webhost","firebaseapp.com","github.io","shopify.com",
+        "wordpress.com","blogspot.com"
+    ]
     features["free_hosting"] = int(any(h in host for h in free_hosts))
 
-    # more scam keywords
     extra_keywords = [
         "superdeal","bonus","giveaway","offer","promo","sale",
         "discount","freegift","claim","verify","secure","update"
     ]
     features["keyword_suspect"] = int(any(k in url_l for k in extra_keywords))
 
-    # ===============================================================
-    # TRAIN MODE → Skip live scanning
-    # ===============================================================
-    if TRAIN_MODE:
+    # ===============================================
+    # TRAIN MODE (skip all live scans)
+    # ===============================================
+    if TRAIN_MODE or FAST_MODE:
         features.update({
             "ssl_valid": 1,
             "domain_age_days": 365,
@@ -307,9 +314,9 @@ def extract_all_features(url):
         features["url"] = u
         return features
 
-    # ===============================================================
-    # LIVE features
-    # ===============================================================
+    # ===============================================
+    # LIVE FEATURES (fallbacks added)
+    # ===============================================
     age = safe_whois(host)
     features["domain_age_days"] = age if age is not None else 365
 
@@ -324,30 +331,28 @@ def extract_all_features(url):
     features["vt_malicious_count"] = vt_mal
     features["vt_detection_ratio"] = vt_ratio
 
-    # HTML ANALYSIS
+    # HTML
     html = safe_request(u, verify=False)
     soup = BeautifulSoup(html, "html.parser") if (BeautifulSoup and html) else None
 
     if soup:
-        # favicon
         try:
             link = soup.find("link", rel=re.compile(".*icon.*", re.I))
             if link:
                 href = link.get("href", "")
-                if not href.startswith("data:"):
+                if href.startswith("data:"):
+                    features["external_favicon"] = 0
+                else:
                     p2 = urllib.parse.urlparse(
                         href if "://" in href else f"http://{host}{href}"
                     )
                     fav_host = (p2.netloc or "").split(":")[0]
                     features["external_favicon"] = int(not fav_host.endswith(host))
-                else:
-                    features["external_favicon"] = 0
             else:
                 features["external_favicon"] = 0
         except:
             features["external_favicon"] = 0
 
-        # login form
         features["login_form"] = int(any(
             ("password" in [i.get("type", "").lower() for i in f.find_all("input")])
             or ("login" in f.text.lower())
@@ -355,10 +360,10 @@ def extract_all_features(url):
         ))
 
         features["iframe_present"] = int(bool(soup.find_all("iframe")))
-
         body = soup.get_text(" ", strip=True).lower()
+
         features["popup_window"] = int(any(
-            k in body for k in ["popup", "modal", "overlay", "subscribe", "cookie"]
+            k in body for k in ["popup","modal","overlay","subscribe","cookie"]
         ))
         features["right_click_disabled"] = int("oncontextmenu" in (html or "").lower())
 
@@ -379,9 +384,9 @@ def extract_all_features(url):
             "web_traffic": 100,
         })
 
-    # ===============================================================
-    # Final Feature Ordering
-    # ===============================================================
+    # ===============================================
+    # Final Expected Feature Order
+    # ===============================================
     expected = [
         "length_url","length_hostname","nb_dots","nb_hyphens","nb_numeric_chars",
         "contains_scam_keyword","nb_at","nb_qm","nb_and","nb_underscore",
