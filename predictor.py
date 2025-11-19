@@ -72,7 +72,7 @@ class Predictor:
         self.feature_names = []
         self._loaded = False
         # DEFAULT Hybrid weights (ML=50, VT=45, GSB=5)
-        self.weights = {"ml": 0.50, "vt": 0.45, "gsb": 0.05}
+        self.weights = {"ml": 0.35, "vt": 0.60, "gsb": 0.05}
 
     def load_models(self):
         if self._loaded:
