@@ -57,32 +57,33 @@ def predict():
         result = predict_from_features(features, models, raw_url=url)
         trust_score = result.get("trust_score")
 
-        # Save ONLY if logged in
-        if user_id:
-            try:
-                db = get_db()
-                cursor = db.cursor()
+       # Save ONLY if logged in
+if user_id:
+    try:
+        db = get_db()
+        cursor = db.cursor()
 
-                cursor.execute("""
-                    INSERT INTO scan_results (user_id, shopping_url, trust_score, scanned_at)
-                    VALUES (%s, %s, %s, NOW())
-                """, (user_id, url, trust_score))
+        cursor.execute("""
+            INSERT INTO scan_results (user_id, shopping_url, trust_score, scanned_at)
+            VALUES (%s, %s, %s, NOW())
+        """, (user_id, url, trust_score))
 
-                cursor.close()
-                db.close()
+        cursor.close()
+        db.close()
 
-                print(f"[DB] Saved scan for user_id={user_id}")
-            except Exception as e:
-                print("DB ERROR:", e)
+        print(f"[DB] Saved scan for user_id={user_id}")
+    except Exception as e:
+        print("DB ERROR:", e)
 
-        else:
-            print("Guest user → Result NOT saved in database.")
+else:
+    print("Guest user → Result NOT saved in database.")
 
-        return jsonify({
-            "url": url,
-            "features": features,
-            "result": result,
-        })
+return jsonify({
+    "url": url,
+    "features": features,
+    "result": result,
+})
+
 
     except Exception as e:
         traceback.print_exc()
