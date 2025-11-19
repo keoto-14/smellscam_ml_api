@@ -61,7 +61,7 @@ class Predictor:
         # Hybrid weights
         if FAST_MODE:
             # VT & GSB disabled → weight moves to ML
-            self.weights = {"ml": 0.65, "vt": 0.35, "gsb": 0.0}
+            self.weights = {"ml": 0.05, "vt": 0.95, "gsb": 0.0}
         else:
             self.weights = {"ml": 0.35, "vt": 0.60, "gsb": 0.05}
 
