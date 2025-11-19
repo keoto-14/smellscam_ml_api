@@ -4,28 +4,26 @@ Flask-Cors==4.0.0
 gunicorn==23.0.0
 python-dotenv==1.0.1
 
-# Core ML
+# ML Core
 numpy==1.26.4
 scikit-learn==1.5.1
 joblib==1.4.2
 xgboost==2.1.0
 
-# Data (only pandas)
+# Data
 pandas==2.2.2
 
-# Web / URL parsing
+# URL / Web Parsing
 requests==2.32.3
-tldextract==5.1.1
 beautifulsoup4==4.12.2
+tldextract==5.1.1
 
-# DNS (non-blocking)
+# DNS / WHOIS
 dnspython==2.6.1
-
-# WHOIS (optional fallback)
 python-whois==0.8.0
 
 # Cache
 cachetools==5.4.0
 
-# MySQL
+# Database
 mysql-connector-python==8.3.0
