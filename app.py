@@ -4,31 +4,31 @@ import traceback
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
-
 import mysql.connector
 
-# Load env variables (Railway auto-loads, this is fallback for local)
+# Load local env (Railway loads automatically)
 load_dotenv()
 
-# ML Predictor + Feature Extractor
+# ML
 from predictor import load_models, predict_from_features
 from url_feature_extractor import extract_all_features
 
-# -----------------------------------------------------------------------------
-# Flask Setup
-# -----------------------------------------------------------------------------
+
+# --------------------------------------------------
+# Flask Init
+# --------------------------------------------------
 app = Flask(__name__)
 CORS(app)
 
-# Load once
+# Load ML models once
 models = load_models()
 
 
-# -----------------------------------------------------------------------------
-# Database Connection (short, safe)
-# -----------------------------------------------------------------------------
+# --------------------------------------------------
+# DB Helper
+# --------------------------------------------------
 def get_db():
-    """Create fresh MySQL connection (Railway-safe)."""
+    """Fast, clean MySQL connector instance."""
     return mysql.connector.connect(
         host=os.getenv("DB_HOST"),
         user=os.getenv("DB_USER"),
@@ -38,36 +38,42 @@ def get_db():
     )
 
 
-# -----------------------------------------------------------------------------
-# Root endpoint
-# -----------------------------------------------------------------------------
+# --------------------------------------------------
+# Root Check
+# --------------------------------------------------
 @app.route("/", methods=["GET"])
 def root():
-    return jsonify({"status": "ok", "message": "SmellScam ML API running"})
+    return jsonify({
+        "status": "running",
+        "service": "SmellScam ML API",
+        "fast_mode": os.getenv("FAST_MODE", "0")
+    })
 
 
-# -----------------------------------------------------------------------------
-# /predict — Main ML Prediction Endpoint
-# -----------------------------------------------------------------------------
+# --------------------------------------------------
+# /predict
+# --------------------------------------------------
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
-        data = request.get_json(force=True)
+        data = request.get_json(silent=True)
+        if not data:
+            return jsonify({"error": "Invalid JSON body"}), 400
 
         url = (data.get("url") or "").strip()
-        user_id = data.get("user_id")  # optional
+        user_id = data.get("user_id")
 
         if not url:
             return jsonify({"error": "Missing 'url'"}), 400
 
-        # Extract ML features
+        # Extract features
         features = extract_all_features(url)
 
-        # Predict
+        # Run ML prediction
         result = predict_from_features(features, models, raw_url=url)
         trust_score = result.get("trust_score", 0)
 
-        # Save scan result for logged-in user only
+        # Save DB history only for logged-in users
         if user_id:
             try:
                 db = get_db()
@@ -83,7 +89,6 @@ def predict():
 
                 cursor.close()
                 db.close()
-                print(f"[DB] Saved scan for user {user_id}")
 
             except Exception as db_err:
                 print("[DB ERROR]", db_err)
@@ -99,14 +104,13 @@ def predict():
         return jsonify({"error": str(e)}), 500
 
 
-# -----------------------------------------------------------------------------
-# /history — User’s personal scan history
-# -----------------------------------------------------------------------------
+# --------------------------------------------------
+# /history
+# --------------------------------------------------
 @app.route("/history", methods=["GET"])
 def history():
     try:
         user_id = request.args.get("user_id")
-
         if not user_id:
             return jsonify({"error": "Missing user_id"}), 400
 
@@ -124,7 +128,6 @@ def history():
         )
 
         rows = cursor.fetchall()
-
         cursor.close()
         db.close()
 
@@ -135,9 +138,9 @@ def history():
         return jsonify({"error": str(e)}), 500
 
 
-# -----------------------------------------------------------------------------
-# /scan_results — Admin endpoint (recent scans)
-# -----------------------------------------------------------------------------
+# --------------------------------------------------
+# /scan_results (admin)
+# --------------------------------------------------
 @app.route("/scan_results", methods=["GET"])
 def scan_results():
     try:
@@ -154,6 +157,7 @@ def scan_results():
         )
 
         rows = cursor.fetchall()
+
         cursor.close()
         db.close()
 
@@ -164,10 +168,10 @@ def scan_results():
         return jsonify({"error": str(e)}), 500
 
 
-# -----------------------------------------------------------------------------
-# Gunicorn / local run
-# -----------------------------------------------------------------------------
+# --------------------------------------------------
+# Gunicorn / Local
+# --------------------------------------------------
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    print(f"🚀 Starting SmellScam API on port {port}")
+    port = int(os.getenv("PORT", 5000))
+    print(f"🚀 SmellScam API running on port {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
