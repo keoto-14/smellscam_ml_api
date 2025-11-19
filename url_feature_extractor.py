@@ -12,6 +12,219 @@ import ssl
 import urllib.parse
 from datetime import datetime
 import urllib3
+# ==============================================================
+# url_feature_extractor.py
+# Ultra-Fast Production Version for Railway (2025)
+# ==============================================================
+
+import os
+import re
+import time
+import urllib.parse
+import math
+
+FAST_MODE = os.environ.get("FAST_MODE", "1") == "1"
+TRAIN_MODE = os.environ.get("TRAIN_MODE", "0") == "1"
+
+# Optional imports
+try:
+    import requests
+except:
+    requests = None
+try:
+    from bs4 import BeautifulSoup
+except:
+    BeautifulSoup = None
+
+
+# ==============================================================
+# Minimal Safe Request (only used if FAST_MODE disabled)
+# ==============================================================
+def safe_request(url, timeout=2, max_bytes=120000):
+    if FAST_MODE or not requests:
+        return None
+
+    try:
+        r = requests.get(
+            url,
+            timeout=timeout,
+            verify=False,
+            headers={"User-Agent": "Mozilla/5.0 SmellScam"},
+        )
+        return r.content[:max_bytes].decode(errors="ignore")
+    except:
+        return None
+
+
+# ==============================================================    
+# Helper: Parse URL & Host
+# ==============================================================    
+def extract_host(url: str):
+    parsed = urllib.parse.urlparse(
+        url if "://" in url else "http://" + url
+    )
+    host = (parsed.netloc or "").split(":")[0].lower()
+    return parsed, host
+
+
+# ==============================================================    
+# Helper: Shannon Entropy
+# ==============================================================    
+def shannon_entropy(s: str):
+    if not s:
+        return 0
+    prob = [s.count(c) / len(s) for c in dict.fromkeys(s)]
+    return -sum(p * math.log(p, 2) for p in prob)
+
+
+# ==============================================================
+# MAIN FEATURE EXTRACTOR
+# ==============================================================
+def extract_all_features(url: str):
+    u = str(url).strip()
+    url_l = u.lower()
+    parsed, host = extract_host(u)
+    path = parsed.path or "/"
+
+    feats = {}
+
+    # ----------------------------------------------------------
+    # BASIC FEATURES (local-only → extremely fast)
+    # ----------------------------------------------------------
+    feats["length_url"] = len(u)
+    feats["length_hostname"] = len(host)
+    feats["nb_dots"] = host.count(".")
+    feats["nb_hyphens"] = host.count("-")
+    feats["nb_numeric_chars"] = sum(c.isdigit() for c in u)
+
+    scam_words = [
+        "login","verify","secure","bank","account","update","confirm",
+        "urgent","pay","gift","free","click","signin","auth"
+    ]
+    feats["contains_scam_keyword"] = int(any(k in url_l for k in scam_words))
+
+    symbols = [
+        ("@", "nb_at"),
+        ("?", "nb_qm"),
+        ("&", "nb_and"),
+        ("_", "nb_underscore"),
+        ("~", "nb_tilde"),
+        ("%", "nb_percent"),
+        ("/", "nb_slash"),
+        ("#", "nb_hash"),
+    ]
+    for sym, name in symbols:
+        feats[name] = u.count(sym)
+
+    feats["shortening_service"] = int(bool(re.search(
+        r"(bit\.ly|tinyurl|goo\.gl|t\.co|ow\.ly|is\.gd|buff\.ly)", url_l
+    )))
+    feats["nb_www"] = int(host.startswith("www"))
+    feats["ends_with_com"] = int(host.endswith(".com"))
+    feats["nb_subdomains"] = max(0, host.count(".") - 1)
+    feats["abnormal_subdomain"] = int(bool(re.match(r"^\d+\.", host)))
+    feats["prefix_suffix"] = int("-" in host)
+    feats["path_extension_php"] = int(path.endswith(".php"))
+
+    # brand match (simple)
+    tokens_host = re.split(r"[\W_]+", host)
+    tokens_path = re.split(r"[\W_]+", path)
+    common = set(t for t in tokens_host if len(t) > 2).intersection(
+        t for t in tokens_path if len(t) > 2
+    )
+    feats["domain_in_brand"] = int(bool(common))
+    feats["brand_in_path"] = int(bool(common))
+
+    feats["char_repeat3"] = int(bool(re.search(r"(.)\1\1", u)))
+    feats["ratio_digits_url"] = (sum(c.isdigit() for c in u) / max(1, len(u))) * 100
+    feats["ratio_digits_host"] = (sum(c.isdigit() for c in host) / max(1, len(host))) * 100
+
+    # ----------------------------------------------------------
+    # NEW FEATURES
+    # ----------------------------------------------------------
+    tld = host.split(".")[-1]
+    feats["suspicious_tld"] = int(tld in {
+        "top","cfd","xyz","cyou","shop","win","vip","asia","click",
+        "online","support","rest","gq","ml","tk","ru"
+    })
+
+    known_brands = [
+        "paypal","bank","coinbase","apple","google","microsoft","meta",
+        "asics","dhl","fedex","post","facebook","instagram","amazon"
+    ]
+    feats["brand_mismatch"] = int(any(b in url_l and b not in host for b in known_brands))
+
+    feats["double_hyphen"] = int("--" in host)
+    feats["subdomain_count"] = host.count(".")
+    feats["suspicious_subdomain"] = int(feats["subdomain_count"] >= 3)
+    feats["entropy_url"] = shannon_entropy(u)
+
+    free_hosts = [
+        "webflow.io","wixsite.com","weebly.com","000webhostapp.com",
+        "github.io","firebaseapp.com","shopify.com"
+    ]
+    feats["free_hosting"] = int(any(h in host for h in free_hosts))
+
+    extra_keywords = [
+        "superdeal","bonus","giveaway","offer","promo","sale",
+        "discount","freegift","claim","verify","secure","update"
+    ]
+    feats["keyword_suspect"] = int(any(k in url_l for k in extra_keywords))
+
+    # ----------------------------------------------------------
+    # FAST MODE + TRAIN MODE: Skip ALL live network scanning
+    # ----------------------------------------------------------
+    if FAST_MODE or TRAIN_MODE:
+        feats.update({
+            "ssl_valid": 1,
+            "domain_age_days": 365,
+            "quad9_blocked": 0,
+            "vt_total_vendors": 0,
+            "vt_malicious_count": 0,
+            "vt_detection_ratio": 0.0,
+            "external_favicon": 0,
+            "login_form": 0,
+            "iframe_present": 0,
+            "popup_window": 0,
+            "right_click_disabled": 0,
+            "empty_title": 0,
+            "web_traffic": 100
+        })
+        feats["url"] = u
+        return feats
+
+    # ----------------------------------------------------------
+    # (ONLY if FAST_MODE disabled) → Minimal HTML scan
+    # ----------------------------------------------------------
+    html = safe_request(u)
+    soup = BeautifulSoup(html, "html.parser") if (BeautifulSoup and html) else None
+
+    if soup:
+        feats["iframe_present"] = int(bool(soup.find_all("iframe")))
+        feats["login_form"] = int(any(
+            ("password" in [i.get("type", "").lower() for i in f.find_all("input")])
+            for f in soup.find_all("form")
+        ))
+        body = soup.get_text(" ", strip=True).lower()
+        feats["popup_window"] = int("popup" in body or "modal" in body or "overlay" in body)
+        feats["right_click_disabled"] = int("oncontextmenu" in (html or "").lower())
+        feats["empty_title"] = int(not (soup.title.string.strip() if soup.title else ""))
+        wc = len(re.findall(r"\w+", body))
+        feats["web_traffic"] = 1000 if wc > 2000 else 500 if wc > 500 else 100
+        feats["external_favicon"] = 0
+    else:
+        feats.update({
+            "external_favicon": 0,
+            "login_form": 0,
+            "iframe_present": 0,
+            "popup_window": 0,
+            "right_click_disabled": 0,
+            "empty_title": 0,
+            "web_traffic": 100
+        })
+
+    feats["url"] = u
+    return feats
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -374,3 +587,4 @@ def extract_all_features(url: str):
 
     features["url"] = u
     return features
+
