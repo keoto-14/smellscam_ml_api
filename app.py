@@ -37,6 +37,16 @@ def get_db():
         autocommit=True
     )
 
+@app.route("/db_test")
+def db_test():
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        cursor.execute("SELECT COUNT(*) FROM scan_results;")
+        count = cursor.fetchone()[0]
+        return {"db": "connected", "rows": count}
+    except Exception as e:
+        return {"db": "error", "error": str(e)}
 
 # --------------------------------------------------
 # Root Check
