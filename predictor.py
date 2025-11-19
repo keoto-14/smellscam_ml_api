@@ -58,9 +58,9 @@ class Predictor:
 
         # Adjusted weights for FAST MODE (no VT/GSB)
         if FAST_MODE:
-            self.weights = {"ml": 0.35, "vt": 0.65, "gsb": 0.0}
+            self.weights = {"ml": 0.20, "vt": 0.80, "gsb": 0.0}
         else:
-            self.weights = {"ml": 0.35, "vt": 0.60, "gsb": 0.05}
+            self.weights = {"ml": 0.20, "vt": 0.80, "gsb": 0.00}
 
     def load_models(self):
         if self._loaded:
