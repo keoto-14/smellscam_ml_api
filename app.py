@@ -5,7 +5,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
 
-# Load env var (Railway UI sets them, no .env needed)
+# Railway loads environment variables automatically
 load_dotenv()
 
 from predictor import load_models, predict_from_features
@@ -14,9 +14,9 @@ from url_feature_extractor import extract_all_features
 app = Flask(__name__)
 CORS(app)
 
-# ------------------------------------------------------------------
-# 1) MySQL DB Connection (Railway MySQL)
-# ------------------------------------------------------------------
+# ---------------------------------------------
+# 1) MySQL DB Connection
+# ---------------------------------------------
 def get_db():
     return mysql.connector.connect(
         host=os.getenv("DB_HOST"),
@@ -26,10 +26,9 @@ def get_db():
         autocommit=True
     )
 
-
-# ------------------------------------------------------------------
-# Load ML models once (fast!)
-# ------------------------------------------------------------------
+# ---------------------------------------------
+# Load ML models one time
+# ---------------------------------------------
 models = load_models()
 
 
@@ -38,65 +37,60 @@ def root():
     return jsonify({"message": "SmellScam ML API is running!"})
 
 
-# ------------------------------------------------------------------
-# 2) Predict API (Main endpoint)
-# ------------------------------------------------------------------
+# ---------------------------------------------
+# 2) Predict API
+# ---------------------------------------------
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
         data = request.get_json(force=True)
 
         url = (data.get("url") or "").strip()
-        user_id = data.get("user_id")  # only sent if logged in
+        user_id = data.get("user_id")  # logged-in user only
 
         if not url:
             return jsonify({"error": "Missing 'url'"}), 400
 
-        # Extract features + model prediction
+        # Extract features + run model
         features = extract_all_features(url)
         result = predict_from_features(features, models, raw_url=url)
         trust_score = result.get("trust_score")
 
-   # ⭐ Save EVERY scan (guest + logged-in)
-scan_id = None
-try:
-    db = get_db()
-    cursor = db.cursor()
+        # Save to DB for logged-in users only
+        if user_id:
+            try:
+                db = get_db()
+                cursor = db.cursor()
 
-    cursor.execute("""
-        INSERT INTO scan_results (user_id, shopping_url, trust_score, scanned_at)
-        VALUES (%s, %s, %s, NOW())
-    """, (user_id, url, trust_score))
+                cursor.execute("""
+                    INSERT INTO scan_results (user_id, shopping_url, trust_score, scanned_at)
+                    VALUES (%s, %s, %s, NOW())
+                """, (user_id, url, trust_score))
 
-    scan_id = cursor.lastrowid   # ⭐ return this to PHP
+                cursor.close()
+                db.close()
 
-    cursor.close()
-    db.close()
+                print(f"[DB] Saved scan for logged-in user {user_id}")
 
-    print(f"[DB] Scan saved. scan_id={scan_id}")
+            except Exception as db_err:
+                print("[DB ERROR]", db_err)
+        else:
+            print("Guest scan → NOT saved (correct behavior)")
 
-except Exception as e:
-    print("DB ERROR:", e)
-
-
-# ⭐ Return scan_id to PHP so rating works
-return jsonify({
-    "url": url,
-    "features": features,
-    "result": result,
-    "scan_id": scan_id
-})
-
-
+        return jsonify({
+            "url": url,
+            "features": features,
+            "result": result
+        })
 
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
-# ------------------------------------------------------------------
-# 3) History for user
-# ------------------------------------------------------------------
+# ---------------------------------------------
+# 3) User Scan History
+# ---------------------------------------------
 @app.route("/history", methods=["GET"])
 def history():
     try:
@@ -116,19 +110,23 @@ def history():
         """, (user_id,))
 
         rows = cursor.fetchall()
+
         cursor.close()
         db.close()
 
-        return jsonify({"count": len(rows), "history": rows})
+        return jsonify({
+            "count": len(rows),
+            "history": rows
+        })
 
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
-# ------------------------------------------------------------------
-# 4) Optional: fetch all results (admin/debug)
-# ------------------------------------------------------------------
+# ---------------------------------------------
+# 4) Admin list of all scan results
+# ---------------------------------------------
 @app.route("/scan_results", methods=["GET"])
 def scan_results():
     try:
@@ -136,26 +134,30 @@ def scan_results():
         cursor = db.cursor(dictionary=True)
 
         cursor.execute("""
-            SELECT *
+            SELECT id, user_id, shopping_url, trust_score, scanned_at
             FROM scan_results
             ORDER BY scanned_at DESC
             LIMIT 200
         """)
 
         rows = cursor.fetchall()
+
         cursor.close()
         db.close()
 
-        return jsonify({"count": len(rows), "results": rows})
+        return jsonify({
+            "count": len(rows),
+            "results": rows
+        })
 
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
-# ------------------------------------------------------------------
-# Run server
-# ------------------------------------------------------------------
+# ---------------------------------------------
+# Run server (Railway uses PORT env var)
+# ---------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
