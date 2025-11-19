@@ -1,3 +1,4 @@
+# predictor.py
 from __future__ import annotations
 import os
 import pickle
@@ -7,6 +8,7 @@ import time
 from typing import Dict, Any, Tuple
 
 import numpy as np
+import pandas as pd  # <- important: feed models DataFrame with column names
 
 # If XGBoost is available
 HAS_XGB = True
@@ -79,7 +81,10 @@ class Predictor:
 
             # XGBoost only if installed
             if HAS_XGB:
-                xgb = load_xgb_model(xgb_path)
+                try:
+                    xgb = load_xgb_model(xgb_path)
+                except Exception:
+                    xgb = None
             else:
                 xgb = None
 
@@ -121,12 +126,17 @@ class Predictor:
             traffic = feats.get("web_traffic", 100)
 
             score = 1.0
-            if age < 30: score *= 0.6
-            elif age < 180: score *= 0.85
-            else: score *= 1.1
+            if age < 30:
+                score *= 0.6
+            elif age < 180:
+                score *= 0.85
+            else:
+                score *= 1.1
 
-            if traffic >= 500: score *= 1.05
-            elif traffic < 100: score *= 0.9
+            if traffic >= 500:
+                score *= 1.05
+            elif traffic < 100:
+                score *= 0.9
 
             score = max(0.2, min(score, 1.6))
             return score / 1.6
@@ -150,9 +160,12 @@ class Predictor:
         else:
             score *= 1.12
 
-        if traffic >= 1000: score *= 1.15
-        elif traffic >= 500: score *= 1.05
-        elif traffic < 100: score *= 0.85
+        if traffic >= 1000:
+            score *= 1.15
+        elif traffic >= 500:
+            score *= 1.05
+        elif traffic < 100:
+            score *= 0.85
 
         score = max(0.05, min(score, 2.5))
         return score / 2.5
@@ -165,29 +178,54 @@ class Predictor:
         if raw_url is None:
             raw_url = feats.get("url", "")
 
-        # Build feature vector
-        X = np.asarray([[float(feats.get(f, 0.0)) for f in self.feature_names]])
+        # Build feature DataFrame (keep the exact column order the model expects)
+        try:
+            row = [float(feats.get(f, 0.0)) for f in self.feature_names]
+        except Exception:
+            # fallback: coerce values individually
+            row = []
+            for f in self.feature_names:
+                try:
+                    row.append(float(feats.get(f, 0.0)))
+                except:
+                    row.append(0.0)
 
-        # Base model predictions
-        if self.models["xgb"] is not None:
-            p_xgb = float(self.models["xgb"].predict_proba(X)[0][1])
-        else:
-            p_xgb = 0.5
+        X = pd.DataFrame([row], columns=self.feature_names)
 
-        p_rf = float(self.models["rf"].predict_proba(X)[0][1])
+        # Base model predictions (protected against failures)
+        p_xgb = 0.5
+        if self.models.get("xgb") is not None:
+            try:
+                p_xgb = float(self.models["xgb"].predict_proba(X)[0][1])
+            except Exception:
+                logger.warning("xgb predict_proba failed, falling back to 0.5")
+
+        p_rf = 0.5
+        try:
+            p_rf = float(self.models["rf"].predict_proba(X)[0][1])
+        except Exception:
+            logger.warning("rf predict_proba failed, falling back to 0.5")
 
         # Stacking
+        p_final = None
         try:
-            meta = np.asarray([[p_xgb, p_rf]])
+            # Provide meta as DataFrame in case stacker was trained with names
+            meta = pd.DataFrame([[p_xgb, p_rf]], columns=["xgb", "rf"])
             p_final = float(self.models["stacker"].predict_proba(meta)[0][1])
-        except:
-            p_final = (p_xgb + p_rf) / 2
+        except Exception:
+            # Fallback if stacker expects numpy or fails
+            try:
+                meta_np = np.asarray([[p_xgb, p_rf]])
+                p_final = float(self.models["stacker"].predict_proba(meta_np)[0][1])
+            except Exception:
+                p_final = (p_xgb + p_rf) / 2.0
+                logger.warning("stacker predict_proba failed, using average fallback")
 
-        ml_component = 1 - p_final
+        ml_component = 1.0 - p_final
 
         # External checks (disabled in FAST MODE)
         vt_total, vt_mal, vt_ratio = self.vt_domain_report(raw_url)
-        vt_component = 1 - vt_ratio
+        vt_component = 1.0 - vt_ratio
 
         gsb_hit = self.check_gsb(raw_url)
         gsb_component = 0.0 if gsb_hit else 1.0
@@ -196,14 +234,16 @@ class Predictor:
 
         # Weighted score
         w = self.weights
+        # keep live weight as remaining mass
+        live_weight = max(0.0, 1.0 - (w.get("ml", 0) + w.get("vt", 0) + w.get("gsb", 0)))
         combined = (
-            w["ml"] * ml_component +
-            w["vt"] * vt_component +
-            w["gsb"] * gsb_component +
-            (1 - sum(w.values())) * live_component
+            w.get("ml", 0) * ml_component +
+            w.get("vt", 0) * vt_component +
+            w.get("gsb", 0) * gsb_component +
+            live_weight * live_component
         )
 
-        combined = min(max(combined, 0), 1)
+        combined = min(max(combined, 0.0), 1.0)
         trust_score = round(combined * 100, 2)
 
         # Label
