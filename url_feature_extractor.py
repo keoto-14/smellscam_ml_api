@@ -90,14 +90,14 @@ def quad9_block(host):
 
 
 # ---------------------------------------------------------
-# MARKETPLACE DETECTOR
+# MARKETPLACE DETECTOR (Shopee, Lazada, Temu, TikTok, Facebook)
 # ---------------------------------------------------------
-def detect_marketplace(host, url):
+def detect_marketplace(host):
     if "shopee.com" in host:
         return 1
     if "lazada.com" in host:
         return 2
-    if "temu.com" in host or "temu.sg" in host:
+    if "temu.com" in host:
         return 3
     if "tiktok.com" in host:
         return 4
@@ -117,7 +117,7 @@ def extract_all_features(url):
 
     f = {}
 
-    # ------------ BASIC ------------
+    # ------------ BASIC FEATURES ------------
     f["length_url"] = len(u)
     f["length_hostname"] = len(host)
     f["nb_dots"] = host.count(".")
@@ -131,14 +131,8 @@ def extract_all_features(url):
     f["contains_scam_keyword"] = int(any(w in url_l for w in scamwords))
 
     for sym, name in [
-        ("@", "nb_at"),
-        ("?", "nb_qm"),
-        ("&", "nb_and"),
-        ("_", "nb_underscore"),
-        ("~", "nb_tilde"),
-        ("%", "nb_percent"),
-        ("/", "nb_slash"),
-        ("#", "nb_hash"),
+        ("@", "nb_at"), ("?", "nb_qm"), ("&", "nb_and"), ("_", "nb_underscore"),
+        ("~", "nb_tilde"), ("%", "nb_percent"), ("/", "nb_slash"), ("#", "nb_hash"),
     ]:
         f[name] = u.count(sym)
 
@@ -150,12 +144,10 @@ def extract_all_features(url):
     f["prefix_suffix"] = int("-" in host)
     f["path_extension_php"] = int(path.endswith(".php"))
 
-    # brand shared words
     tk_host = re.split(r"[\W_]+", host)
     tk_path = re.split(r"[\W_]+", path)
     common = set(t for t in tk_host if len(t) > 2).intersection(
-        t for t in tk_path if len(t) > 2
-    )
+        t for t in tk_path if len(t) > 2)
     f["domain_in_brand"] = int(bool(common))
     f["brand_in_path"] = int(bool(common))
 
@@ -175,37 +167,24 @@ def extract_all_features(url):
     f["subdomain_count"] = host.count(".")
     f["suspicious_subdomain"] = int(f["subdomain_count"] >= 3)
 
-    # entropy
     def entropy(s):
         import math
         prob = [s.count(c)/len(s) for c in dict.fromkeys(s)]
         return -sum(p * math.log(p, 2) for p in prob)
     f["entropy_url"] = entropy(u) if u else 0
 
-    free_hosts = [
-        "wixsite.com","weebly.com","000webhost","github.io","webflow.io","blogspot.com"
-    ]
+    free_hosts = ["wixsite.com","weebly.com","000webhost","github.io","webflow.io","blogspot.com"]
     f["free_hosting"] = int(any(h in host for h in free_hosts))
 
-    f["keyword_suspect"] = int(any(k in url_l for k in [
-        "promo","discount","freegift","bonus","offer","deal"
-    ]))
+    f["keyword_suspect"] = int(any(k in url_l for k in ["promo","discount","freegift","bonus","offer","deal"]))
 
-    # ------------ LIVE DATA OR FAST ------------
+    # ------------ LIVE FEATURES or FAST ------------
     if FAST_MODE or TRAIN_MODE:
         f.update({
-            "ssl_valid": 1,
-            "domain_age_days": 365,
-            "quad9_blocked": 0,
-            "vt_total_vendors": 0,
-            "vt_malicious_count": 0,
-            "vt_detection_ratio": 0.0,
-            "external_favicon": 0,
-            "login_form": 0,
-            "iframe_present": 0,
-            "popup_window": 0,
-            "right_click_disabled": 0,
-            "empty_title": 0,
+            "ssl_valid": 1, "domain_age_days": 365, "quad9_blocked": 0,
+            "vt_total_vendors": 0, "vt_malicious_count": 0, "vt_detection_ratio": 0.0,
+            "external_favicon": 0, "login_form": 0, "iframe_present": 0,
+            "popup_window": 0, "right_click_disabled": 0, "empty_title": 0,
             "web_traffic": 100,
         })
     else:
@@ -231,19 +210,20 @@ def extract_all_features(url):
             f["empty_title"] = int(title == "")
 
             wc = len(re.findall(r"\w+", txt))
-            f["web_traffic"] = 1000 if wc > 2000 else 500 if wc > 500 else 100 if wc > 100 else 10
+            f["web_traffic"] = (
+                1000 if wc > 2000 else
+                500 if wc > 500 else
+                100 if wc > 100 else
+                10
+            )
 
             f["external_favicon"] = 0
         else:
             f.update({
-                "external_favicon": 0,
-                "login_form": 0,
-                "iframe_present": 0,
-                "popup_window": 0,
-                "right_click_disabled": 0,
-                "empty_title": 0,
-                "web_traffic": 100,
-            })    
+                "external_favicon": 0, "login_form": 0, "iframe_present": 0,
+                "popup_window": 0, "right_click_disabled": 0,
+                "empty_title": 0, "web_traffic": 100,
+            })
 
     # ---------------------------------------------------------
     # HTTPS DETECTOR
@@ -251,11 +231,13 @@ def extract_all_features(url):
     f["uses_https"] = int(u.startswith("https://"))
 
     # ---------------------------------------------------------
-    # MARKETPLACE DETECTOR (Shopee, Lazada, Temu, TikTok, FB)
+    # MARKETPLACE DETECTOR
     # ---------------------------------------------------------
-    f["marketplace_type"] = detect_marketplace(host, u)
+    f["marketplace_type"] = detect_marketplace(host)
 
-    # ------------- FIXED FEATURE ORDER -------------
+    # ---------------------------------------------------------
+    # FIXED ORDER (including new features)
+    # ---------------------------------------------------------
     expected = [
         "length_url","length_hostname","nb_dots","nb_hyphens","nb_numeric_chars",
         "contains_scam_keyword","nb_at","nb_qm","nb_and","nb_underscore",
@@ -272,9 +254,8 @@ def extract_all_features(url):
         "login_form","iframe_present","popup_window",
         "right_click_disabled","empty_title","web_traffic",
 
-        # NEW FEATURES
         "uses_https",
-        "marketplace_type"
+        "marketplace_type",
     ]
 
     for k in expected:
