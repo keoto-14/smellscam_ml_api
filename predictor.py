@@ -1,4 +1,5 @@
-# predictor.py
+# predictor.py  — UPDATED CLEAN VERSION (Option 1)
+
 from __future__ import annotations
 import os
 import pickle
@@ -10,7 +11,7 @@ from typing import Dict, Any, Tuple
 import numpy as np
 import pandas as pd
 
-# try to import xgboost (optional)
+# Optional XGBoost
 HAS_XGB = True
 try:
     from xgboost import XGBClassifier
@@ -29,7 +30,8 @@ VT_API_KEY = os.environ.get("VT_API_KEY")
 GSB_API_KEY = os.environ.get("GSB_API_KEY")
 FAST_MODE = os.environ.get("FAST_MODE", "0") == "1"
 
-# ---------------- Cache ------------------
+
+# ---------------------- simple cache ----------------------
 _CACHE: Dict[str, tuple] = {}
 
 def cache_get(k: str, max_age: int = 3600):
@@ -42,7 +44,8 @@ def cache_get(k: str, max_age: int = 3600):
 def cache_set(k: str, v: Any):
     _CACHE[k] = (time.time(), v)
 
-# ---------------- Model loaders ------------------
+
+# ---------------------- Loading helpers -------------------
 class ModelLoadError(Exception):
     pass
 
@@ -53,34 +56,33 @@ def load_pickle(path: str):
 def load_xgb_model(path: str):
     if not HAS_XGB:
         raise RuntimeError("XGBoost not installed")
-    m = XGBClassifier()
-    m.load_model(path)
-    return m
+    model = XGBClassifier()
+    model.load_model(path)
+    return model
 
-# ======================================================
-#                     PREDICTOR CLASS
-# ======================================================
+
+# ==========================================================
+#                PREDICTOR CLASS
+# ==========================================================
 class Predictor:
     def __init__(self):
-        self.models: Dict[str, Any] = {}
+        self.models = {}
         self.feature_names = []
         self._loaded = False
 
-        # Weights for hybrid model
+        # Base model weight
         self.weights = {
             "ml": float(os.getenv("ML_WEIGHT", 0.60)),
             "vt": float(os.getenv("VT_WEIGHT", 0.35)),
             "gsb": float(os.getenv("GSB_WEIGHT", 0.05)),
         }
 
-        # Normalize if > 1
         s = sum(self.weights.values())
         if s > 1:
             for k in self.weights:
-                self.weights[k] = self.weights[k] / s
-            logger.info("Normalized weights: %s", self.weights)
+                self.weights[k] /= s
 
-    # ---------------- Load ML models ----------------
+    # ------------------------------------------------------
     def load_models(self):
         if self._loaded:
             return
@@ -90,63 +92,60 @@ class Predictor:
             stacker = load_pickle(os.path.join(MODEL_DIR, "stacker.pkl"))
             features = load_pickle(os.path.join(MODEL_DIR, "features.pkl"))
 
-            # XGB optional
-            xgb = None
-            xgb_path = os.path.join(MODEL_DIR, "xgb.json")
-            if HAS_XGB and os.path.exists(xgb_path):
+            if HAS_XGB and os.path.exists(os.path.join(MODEL_DIR, "xgb.json")):
                 try:
-                    xgb = load_xgb_model(xgb_path)
-                except:
+                    xgb = load_xgb_model(os.path.join(MODEL_DIR, "xgb.json"))
+                except Exception:
                     xgb = None
+            else:
+                xgb = None
 
-            self.models = {
-                "rf": rf,
-                "stacker": stacker,
-                "xgb": xgb
-            }
+            self.models = {"rf": rf, "stacker": stacker, "xgb": xgb}
             self.feature_names = list(features)
-            self._loaded = True
 
         except Exception as e:
             raise ModelLoadError(str(e))
 
-    # ---------------- VirusTotal ----------------
-    def vt_domain_report(self, domain: str) -> Tuple[int, int, float]:
-        if FAST_MODE or not VT_API_KEY:
-            return 0,0,0.0
+        self._loaded = True
 
-        key = f"vt::{domain}"
-        cached = cache_get(key)
+    # ==========================================================
+    #                   VIRUSTOTAL
+    # ==========================================================
+    def vt_domain_report(self, domain: str):
+        if FAST_MODE or not VT_API_KEY:
+            return 0, 0, 0.0
+
+        cached = cache_get(f"vt::{domain}")
         if cached:
             return cached["total"], cached["mal"], cached["ratio"]
 
         try:
             import requests
-            r = requests.get(
-                f"https://www.virustotal.com/api/v3/domains/{domain}",
-                headers={"x-apikey": VT_API_KEY},
-                timeout=5
-            )
+            url = f"https://www.virustotal.com/api/v3/domains/{domain}"
+            r = requests.get(url, headers={"x-apikey": VT_API_KEY}, timeout=5)
+
             if r.status_code == 200:
                 stats = r.json().get("data", {}).get("attributes", {}).get("last_analysis_stats", {})
-                total = sum(stats.values()) if stats else 0
+                total = sum(stats.values())
                 mal = stats.get("malicious", 0)
-                ratio = mal / total if total>0 else 0.0
-                cache_set(key, {"total":total,"mal":mal,"ratio":ratio})
+                ratio = mal / total if total else 0.0
+
+                cache_set(f"vt::{domain}", {"total": total, "mal": mal, "ratio": ratio})
                 return total, mal, ratio
         except:
             pass
 
-        cache_set(key, {"total":0,"mal":0,"ratio":0.0})
-        return 0,0,0.0
+        cache_set(f"vt::{domain}", {"total": 0, "mal": 0, "ratio": 0.0})
+        return 0, 0, 0.0
 
-    # ---------------- Google Safe Browsing ----------------
-    def check_gsb(self, url: str) -> bool:
+    # ==========================================================
+    #                   GOOGLE SAFE BROWSING
+    # ==========================================================
+    def check_gsb(self, url: str):
         if FAST_MODE or not GSB_API_KEY:
             return False
 
-        key = f"gsb::{url}"
-        cached = cache_get(key)
+        cached = cache_get(f"gsb::{url}")
         if cached is not None:
             return bool(cached)
 
@@ -154,91 +153,86 @@ class Predictor:
             import requests
             api = f"https://safebrowsing.googleapis.com/v4/threatMatches:find?key={GSB_API_KEY}"
             body = {
-                "client":{"clientId":"smellscam","clientVersion":"1.0"},
-                "threatInfo":{
-                    "threatTypes":["MALWARE","SOCIAL_ENGINEERING","UNWANTED_SOFTWARE"],
-                    "platformTypes":["ANY_PLATFORM"],
-                    "threatEntryTypes":["URL"],
-                    "threatEntries":[{"url":url}]
-                }
+                "client": {"clientId": "smellscam", "clientVersion": "1.0"},
+                "threatInfo": {
+                    "threatTypes": ["MALWARE", "SOCIAL_ENGINEERING", "UNWANTED_SOFTWARE"],
+                    "platformTypes": ["ANY_PLATFORM"],
+                    "threatEntryTypes": ["URL"],
+                    "threatEntries": [{"url": url}],
+                },
             }
-            r = requests.post(api,json=body,timeout=5)
+            r = requests.post(api, json=body, timeout=5)
             matches = bool(r.json().get("matches"))
-            cache_set(key,matches)
+            cache_set(f"gsb::{url}", matches)
             return matches
+
         except:
-            cache_set(key,False)
+            cache_set(f"gsb::{url}", False)
             return False
 
-    # --------------- Live Component ----------------
-    def _live_component(self, feats: dict) -> float:
-        age = int(feats.get("domain_age_days", 365))
-        traffic = int(feats.get("web_traffic", 100))
-        ssl = int(feats.get("ssl_valid", 0))
-        quad9 = int(feats.get("quad9_blocked", 0))
-        domain_exists = int(feats.get("domain_exists", 1))
+    # ==========================================================
+    #                LIVE COMPONENT
+    # ==========================================================
+    def _live_component(self, feats):
+        quad9 = feats.get("quad9_blocked", 0)
+        ssl = feats.get("ssl_valid", 0)
+        age = feats.get("domain_age_days", 0)
+        traffic = feats.get("web_traffic", 100)
 
         score = 1.0
 
-        # Blocked by Quad9 = strong penalty
-        score *= 0.25 if quad9 else 1.05
+        if quad9:
+            score *= 0.3
+        if not ssl:
+            score *= 0.75
 
-        # Domain does NOT exist
-        if domain_exists == 0:
-            score *= 0.4
-
-        # SSL
-        score *= 1.05 if ssl else 0.9
-
-        # Domain age
         if age < 30:
             score *= 0.6
         elif age < 180:
-            score *= 0.85
-        elif age > 1000:
-            score *= 1.12
+            score *= 0.8
+        else:
+            score *= 1.05
 
-        # Traffic
-        if traffic >= 1000:
+        if traffic > 1000:
             score *= 1.15
-        elif traffic >= 500:
+        elif traffic > 500:
             score *= 1.05
         elif traffic < 100:
             score *= 0.85
 
-        return max(0.05, min(score, 2.5)) / 2.5
+        return max(0.1, min(score, 2.0)) / 2.0
 
-    # --------------- Seller Adjustment ----------------
-    def adjust_for_seller(self, trust_score: float, seller_status: int) -> float:
-        """
-        seller_status:
-            1 = verified
-            0 = unknown
-            2 = suspicious
-        """
-        if seller_status == 1:
-            trust_score = max(trust_score, 80)
+    # ==========================================================
+    #     ⭐ SELLER SCORE ADJUSTMENT (new for marketplaces)
+    # ==========================================================
+    def adjust_seller(self, trust: float, feats: dict):
+        seller = feats.get("seller_status", 0)
 
-        elif seller_status == 0:
-            trust_score -= 10
+        if seller == 1:            # Verified seller
+            trust = max(trust, 80)
 
-        elif seller_status == 2:
-            trust_score -= 20
+        elif seller == 0:          # Unknown seller
+            trust -= 10
 
-        return max(1, min(trust_score, 100))
+        elif seller == 2:          # Suspicious seller
+            trust -= 20
 
-    # ======================================================
-    #                    MAIN PREDICT
-    # ======================================================
-    def predict_from_features(self, feats: dict, models_obj=None, raw_url: str=None):
+        return max(1, min(trust, 100))
+
+    # ==========================================================
+    #                    MAIN PREDICT FUNCTION
+    # ==========================================================
+    def predict_from_features(self, feats, models_obj=None, raw_url=None):
         self.load_models()
-        raw_url = raw_url or feats.get("url","")
 
-        # Build ML input
-        X_vec = [float(feats.get(f,0.0)) for f in self.feature_names]
+        raw_url = raw_url or feats.get("url", "")
+        domain = urllib.parse.urlparse(raw_url).netloc.split(":")[0].lower()
+
+        # ML INPUT
+        X_vec = [float(feats.get(f, 0.0)) for f in self.feature_names]
         X_df = pd.DataFrame([X_vec], columns=self.feature_names)
 
-        # Base model predictions
+        # Base model proba
         try:
             p_xgb = float(self.models["xgb"].predict_proba(X_df)[0][1]) if self.models["xgb"] else 0.5
         except:
@@ -253,86 +247,66 @@ class Predictor:
             meta = np.asarray([[p_xgb, p_rf]])
             p_final = float(self.models["stacker"].predict_proba(meta)[0][1])
         except:
-            p_final = (p_xgb + p_rf) / 2.0
+            p_final = (p_xgb + p_rf) / 2
 
-        ml_mal = min(max(p_final, 0.0), 1.0)
-        ml_component = 1.0 - ml_mal  # convert to trust
+        # ML -> trust
+        ml_trust = 1.0 - p_final
 
-        # VirusTotal + GSB
-        parsed = urllib.parse.urlparse(raw_url)
-        domain = (parsed.netloc or raw_url).lower().split(":")[0]
-
+        # External checks
         vt_total, vt_mal, vt_ratio = self.vt_domain_report(domain)
         gsb_hit = self.check_gsb(raw_url)
 
-        vt_component = (
-            1.0 if vt_total == 0 else
-            0.7 if vt_total < 5 else
-            1.0 - min(max(vt_ratio,0.0),1.0)
-        )
+        # VT component
+        if vt_total == 0:
+            vt_comp = 1.0
+        elif vt_total < 5:
+            vt_comp = 0.7
+        else:
+            vt_comp = 1.0 - vt_ratio
 
-        gsb_component = 0.0 if gsb_hit else 1.0
+        gsb_comp = 0.0 if gsb_hit else 1.0
+        live_comp = self._live_component(feats)
 
-        # Live component
-        live_component = self._live_component(feats)
-
-        # Combine weighted
+        # Weighted combine
         w_ml = self.weights["ml"]
         w_vt = self.weights["vt"]
         w_gsb = self.weights["gsb"]
-        leftover = 1.0 - (w_ml + w_vt + w_gsb)
+        leftover = 1 - (w_ml + w_vt + w_gsb)
 
         combined = (
-            w_ml * ml_component +
-            w_vt * vt_component +
-            w_gsb * gsb_component +
-            leftover * live_component
+            w_ml * ml_trust +
+            w_vt * vt_comp +
+            w_gsb * gsb_comp +
+            leftover * live_comp
         )
 
-        combined = min(max(combined,0.0),1.0)
-        trust_score = round(combined*100,2)
+        trust = round(combined * 100, 2)
 
-        # ------------------ Apply Seller Adjustments ------------------
-        seller_status = int(feats.get("seller_status",0))
-        trust_score = self.adjust_for_seller(trust_score, seller_status)
+        # FINAL SELLER ADJUSTMENT
+        trust = self.adjust_seller(trust, feats)
 
-
-        # Marketplace safe override
-market = int(feats.get("marketplace_type", 0))
-if market in [1,2,3,4,5]:   # Shopee, Lazada, Temu, TikTok, Facebook
-    return {
-        "trust_score": 85,
-        "label": "LEGITIMATE",
-        "override": "marketplace_safe",
-        "model_probs": {"xgb": p_xgb, "rf": p_rf, "ml_final": p_final},
-        "vt": {"total_vendors": vt_total, "malicious": vt_mal, "ratio": vt_ratio},
-        "gsb_match": gsb_hit,
-        "live_component": round(live_component, 4),
-        "marketplace_type": market
-    }
-
-        # ------------------ Apply Domain Exists Override ------------------
-        if feats.get("domain_exists",1) == 0:
-            trust_score = min(trust_score, 40)
-
-        # Label mapping
-        label = (
-            "PHISHING" if trust_score < 50 else
-            "SUSPICIOUS" if trust_score < 75 else
-            "LEGITIMATE"
-        )
+        # LABEL
+        if trust < 50:
+            label = "PHISHING"
+        elif trust < 75:
+            label = "SUSPICIOUS"
+        else:
+            label = "LEGITIMATE"
 
         return {
-            "trust_score": trust_score,
+            "trust_score": trust,
             "label": label,
-            "model_probs": {"xgb":p_xgb, "rf":p_rf, "ml_final":p_final},
-            "vt":{"total_vendors":vt_total,"malicious":vt_mal,"ratio":vt_ratio},
+            "model_probs": {"xgb": p_xgb, "rf": p_rf, "ml_final": p_final},
+            "vt": {"total_vendors": vt_total, "malicious": vt_mal, "ratio": vt_ratio},
             "gsb_match": gsb_hit,
-            "seller_status": seller_status,
-            "live_component": round(live_component,4)
+            "seller_status": feats.get("seller_status", 0),
+            "live_component": round(live_comp, 4),
         }
 
-# ---------------- global helper ----------------
+
+# ==========================================================
+# GLOBAL HELPERS
+# ==========================================================
 _GLOBAL_PREDICTOR = None
 
 def load_models():
@@ -342,6 +316,8 @@ def load_models():
         _GLOBAL_PREDICTOR.load_models()
     return _GLOBAL_PREDICTOR
 
-def predict_from_features(features: dict, models_obj=None, raw_url: str=None):
+def predict_from_features(features, models_obj=None, raw_url=None):
+    if hasattr(models_obj, "predict_from_features"):
+        return models_obj.predict_from_features(features, raw_url=raw_url)
     pred = load_models()
     return pred.predict_from_features(features, raw_url=raw_url)
