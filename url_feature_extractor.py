@@ -3,7 +3,6 @@ import re
 import urllib.parse
 import ssl
 import socket
-import time
 from datetime import datetime
 import urllib3
 
@@ -88,6 +87,23 @@ def quad9_block(host):
         return 0
     except:
         return 1
+
+
+# ---------------------------------------------------------
+# MARKETPLACE DETECTOR
+# ---------------------------------------------------------
+def detect_marketplace(host, url):
+    if "shopee.com" in host:
+        return 1
+    if "lazada.com" in host:
+        return 2
+    if "temu.com" in host or "temu.sg" in host:
+        return 3
+    if "tiktok.com" in host:
+        return 4
+    if "facebook.com" in host:
+        return 5
+    return 0
 
 
 # ---------------------------------------------------------
@@ -217,7 +233,6 @@ def extract_all_features(url):
             wc = len(re.findall(r"\w+", txt))
             f["web_traffic"] = 1000 if wc > 2000 else 500 if wc > 500 else 100 if wc > 100 else 10
 
-            # favicon external?
             f["external_favicon"] = 0
         else:
             f.update({
@@ -230,7 +245,17 @@ def extract_all_features(url):
                 "web_traffic": 100,
             })    
 
-    # ------------- FIXED FEATURE ORDER (47 TOTAL) -------------
+    # ---------------------------------------------------------
+    # HTTPS DETECTOR
+    # ---------------------------------------------------------
+    f["uses_https"] = int(u.startswith("https://"))
+
+    # ---------------------------------------------------------
+    # MARKETPLACE DETECTOR (Shopee, Lazada, Temu, TikTok, FB)
+    # ---------------------------------------------------------
+    f["marketplace_type"] = detect_marketplace(host, u)
+
+    # ------------- FIXED FEATURE ORDER -------------
     expected = [
         "length_url","length_hostname","nb_dots","nb_hyphens","nb_numeric_chars",
         "contains_scam_keyword","nb_at","nb_qm","nb_and","nb_underscore",
@@ -245,7 +270,11 @@ def extract_all_features(url):
         "ssl_valid","domain_age_days","quad9_blocked","vt_total_vendors",
         "vt_malicious_count","vt_detection_ratio","external_favicon",
         "login_form","iframe_present","popup_window",
-        "right_click_disabled","empty_title","web_traffic"
+        "right_click_disabled","empty_title","web_traffic",
+
+        # NEW FEATURES
+        "uses_https",
+        "marketplace_type"
     ]
 
     for k in expected:
