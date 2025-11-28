@@ -296,6 +296,21 @@ class Predictor:
         seller_status = int(feats.get("seller_status",0))
         trust_score = self.adjust_for_seller(trust_score, seller_status)
 
+
+        # Marketplace safe override
+market = int(feats.get("marketplace_type", 0))
+if market in [1,2,3,4,5]:   # Shopee, Lazada, Temu, TikTok, Facebook
+    return {
+        "trust_score": 85,
+        "label": "LEGITIMATE",
+        "override": "marketplace_safe",
+        "model_probs": {"xgb": p_xgb, "rf": p_rf, "ml_final": p_final},
+        "vt": {"total_vendors": vt_total, "malicious": vt_mal, "ratio": vt_ratio},
+        "gsb_match": gsb_hit,
+        "live_component": round(live_component, 4),
+        "marketplace_type": market
+    }
+
         # ------------------ Apply Domain Exists Override ------------------
         if feats.get("domain_exists",1) == 0:
             trust_score = min(trust_score, 40)
