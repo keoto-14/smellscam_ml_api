@@ -33,7 +33,7 @@ except:
 
 
 # ---------------------------------------------------------
-# helpers
+# HELPERS
 # ---------------------------------------------------------
 def extract_host(url):
     p = urllib.parse.urlparse(url if "://" in url else "http://" + url)
@@ -51,21 +51,18 @@ def safe_request(url):
 
 
 def safe_whois(host):
-    """Return domain age OR 365 when unknown."""
     if FAST_MODE or not pywhois:
         return 365
     try:
         w = pywhois.whois(host)
         cd = w.creation_date
-        if isinstance(cd, list):
-            cd = cd[0]
-        if isinstance(cd, str):
-            cd = datetime.fromisoformat(cd)
+        if isinstance(cd, list): cd = cd[0]
+        if isinstance(cd, str): cd = datetime.fromisoformat(cd)
         if cd:
             return max(0, (datetime.utcnow() - cd).days)
     except:
-        return 365
-    return 365
+        return -1  # <---- domain might NOT exist
+    return -1
 
 
 def safe_ssl(host):
@@ -77,7 +74,7 @@ def safe_ssl(host):
             with ctx.wrap_socket(s, server_hostname=host) as sock:
                 return 1 if sock.getpeercert() else 0
     except:
-        return 1
+        return 0
 
 
 def quad9_block(host):
@@ -93,42 +90,63 @@ def quad9_block(host):
 
 
 # ---------------------------------------------------------
-# NEW: Domain Exists Check
+# MARKETPLACE DETECTOR (NUMBERS ONLY)
 # ---------------------------------------------------------
-def check_domain_exists(host):
-    """Returns 1 if domain resolves, 0 if not."""
-    try:
-        socket.gethostbyname(host)
-        return 1
-    except:
-        return 0
+# 0 = unknown / normal website
+# 1 = Shopee
+# 2 = Lazada
+# 3 = Temu
+# 4 = TikTok
+# 5 = Facebook Shop
 
-
-# ---------------------------------------------------------
-# NEW: Marketplace / Seller detector
-# ---------------------------------------------------------
-def detect_seller(host, url):
-    host = host.lower()
-
+def detect_marketplace(host):
     if "shopee.com" in host:
         return 1
     if "lazada.com" in host:
         return 2
-    if "temu.com" in host or "temu.sg" in host:
+    if "temu.com" in host:
         return 3
-    if "tiktok.com" in host:
+    if "tiktok.com" in host or "ttlivecdn.com" in host:
         return 4
-    if "facebook.com" in host:
+    if "facebook.com" in host or "fb.com" in host:
         return 5
+    return 0
+
+
+# ---------------------------------------------------------
+# SELLER DETECTOR (LIGHTWEIGHT)
+# ---------------------------------------------------------
+# 0 = unknown seller (could be risky)
+# 1 = verified seller (only for Shopee / Lazada format)
+# 2 = big marketplace official page
+
+def detect_seller(url):
+    url_l = url.lower()
+
+    # Marketplace official
+    if "official" in url_l or "shop" in url_l and "official" in url_l:
+        return 2
+
+    # Shopee seller format:  ... i.<sellerid>.<productid>
+    if "shopee.com" in url_l and "i." in url_l:
+        parts = url_l.split("i.")
+        if len(parts) > 1:
+            seller_block = parts[1].split(".")
+            if seller_block[0].isdigit() and len(seller_block[0]) >= 5:
+                return 1
+
+    # Lazada seller format:  ...-s123456789.html
+    m = re.search(r"-s(\d+)", url_l)
+    if m:
+        return 1
 
     return 0  # unknown seller
 
 
 # ---------------------------------------------------------
-# main
+# MAIN
 # ---------------------------------------------------------
 def extract_all_features(url):
-
     u = str(url).strip()
     p, host = extract_host(u)
     path = p.path or "/"
@@ -143,8 +161,10 @@ def extract_all_features(url):
     f["nb_hyphens"] = host.count("-")
     f["nb_numeric_chars"] = sum(c.isdigit() for c in u)
 
-    scamwords = ["login","verify","secure","bank","account","update",
-                 "confirm","urgent","pay","gift","free","click","signin","auth"]
+    scamwords = [
+        "login","verify","secure","bank","account","update",
+        "confirm","urgent","pay","gift","free","click","signin","auth"
+    ]
     f["contains_scam_keyword"] = int(any(w in url_l for w in scamwords))
 
     for sym, name in [
@@ -173,7 +193,7 @@ def extract_all_features(url):
     f["ratio_digits_url"] = (sum(c.isdigit() for c in u) / max(1, len(u))) * 100
     f["ratio_digits_host"] = (sum(c.isdigit() for c in host) / max(1, len(host))) * 100
 
-    # NEW FEATURES
+    # NEW BASIC FEATURES
     tld = host.split(".")[-1]
     sus_tlds = {"top","xyz","win","tk","ml","gq","ru","shop","vip","live"}
     f["suspicious_tld"] = int(tld in sus_tlds)
@@ -197,22 +217,23 @@ def extract_all_features(url):
 
     f["keyword_suspect"] = int(any(k in url_l for k in ["promo","discount","freegift","bonus","offer","deal"]))
 
-    # LIVE FIELDS
+    # LIVE (SAFE MODE)
     if FAST_MODE or TRAIN_MODE:
         f.update({
-            "ssl_valid": 1, "domain_age_days": 365, "quad9_blocked": 0,
-            "vt_total_vendors": 0, "vt_malicious_count": 0, "vt_detection_ratio": 0.0,
-            "external_favicon": 0, "login_form": 0, "iframe_present": 0,
-            "popup_window": 0, "right_click_disabled": 0, "empty_title": 0,
+            "ssl_valid": 1,
+            "domain_age_days": 365,
+            "quad9_blocked": 0,
+            "login_form": 0,
+            "iframe_present": 0,
+            "popup_window": 0,
+            "right_click_disabled": 0,
+            "empty_title": 0,
             "web_traffic": 100
         })
     else:
         f["ssl_valid"] = safe_ssl(host)
-        f["domain_age_days"] = safe_whois(host)
+        f["domain_age_days"] = safe_whois(host)  # MAY RETURN -1
         f["quad9_blocked"] = quad9_block(host)
-        f["vt_total_vendors"] = 0
-        f["vt_malicious_count"] = 0
-        f["vt_detection_ratio"] = 0.0
 
         html = safe_request(u)
         soup = BeautifulSoup(html, "html.parser") if (html and BeautifulSoup) else None
@@ -222,29 +243,26 @@ def extract_all_features(url):
             f["login_form"] = int(bool(soup.find_all("input", {"type": "password"})))
             txt = soup.get_text(" ", strip=True).lower()
             f["popup_window"] = int("popup" in txt or "modal" in txt)
-            f["right_click_disabled"] = int("oncontextmenu" in html.lower())
+            f["right_click_disabled"] = int("oncontextmenu" in (html.lower() if html else ""))
             title = soup.title.string.strip() if soup.title else ""
             f["empty_title"] = int(title == "")
             wc = len(re.findall(r"\w+", txt))
             f["web_traffic"] = 1000 if wc > 2000 else 500 if wc > 500 else 100 if wc > 100 else 10
-            f["external_favicon"] = 0
         else:
-            f.update({
-                "external_favicon": 0, "login_form": 0, "iframe_present": 0,
-                "popup_window": 0, "right_click_disabled": 0,
-                "empty_title": 0, "web_traffic": 100
-            })
+            f["iframe_present"] = 0
+            f["login_form"] = 0
+            f["popup_window"] = 0
+            f["right_click_disabled"] = 0
+            f["empty_title"] = 0
+            f["web_traffic"] = 50
 
-    # ADD HTTPS FLAG
+    # EXTRA NEW FEATURES
     f["uses_https"] = int(u.startswith("https://"))
+    f["marketplace_type"] = detect_marketplace(host)
+    f["seller_type"] = detect_seller(u)  # NEW
+    f["domain_exists"] = 0 if f["domain_age_days"] == -1 else 1
 
-    # ADD SELLER DETECTOR
-    f["seller_type"] = detect_seller(host, u)
-
-    # ADD DOMAIN EXISTENCE CHECK
-    f["domain_exists"] = check_domain_exists(host)
-
-    # FIXED ORDER
+    # ORDER
     expected = [
         "length_url","length_hostname","nb_dots","nb_hyphens","nb_numeric_chars",
         "contains_scam_keyword","nb_at","nb_qm","nb_and","nb_underscore",
@@ -254,11 +272,10 @@ def extract_all_features(url):
         "char_repeat3","ratio_digits_url","ratio_digits_host",
         "suspicious_tld","brand_mismatch","double_hyphen","subdomain_count",
         "suspicious_subdomain","entropy_url","free_hosting","keyword_suspect",
-        "ssl_valid","domain_age_days","quad9_blocked","vt_total_vendors",
-        "vt_malicious_count","vt_detection_ratio","external_favicon",
+        "ssl_valid","domain_age_days","quad9_blocked",
         "login_form","iframe_present","popup_window",
         "right_click_disabled","empty_title","web_traffic",
-        "uses_https", "seller_type", "domain_exists"
+        "uses_https","marketplace_type","seller_type","domain_exists"
     ]
 
     for k in expected:
