@@ -89,9 +89,6 @@ def quad9_block(host):
         return 1
 
 
-# ---------------------------------------------------------
-# Domain exists?
-# ---------------------------------------------------------
 def check_dns_exists(host):
     if not dns:
         return 1
@@ -103,44 +100,38 @@ def check_dns_exists(host):
 
 
 # ---------------------------------------------------------
-# Marketplace Detector (simple)
+# Marketplace Detector
 # ---------------------------------------------------------
 def detect_marketplace(host):
-    if "shopee.com" in host:
-        return 1
-    if "lazada.com" in host:
-        return 2
-    if "temu.com" in host:
-        return 3
-    if "tiktok.com" in host:
-        return 4
-    if "facebook.com" in host:
-        return 5
+    if "shopee.com" in host: return 1
+    if "lazada.com" in host: return 2
+    if "temu.com" in host: return 3
+    if "tiktok.com" in host: return 4
+    if "facebook.com" in host: return 5
     return 0
 
 
 # ---------------------------------------------------------
-# Seller Detector (simple logic, safe)
+# Seller Detector
 # ---------------------------------------------------------
 def detect_seller_status(url, host):
     url_l = url.lower()
 
-    # Verified patterns
-    if "official" in url_l or "verified" in url_l or "flagship" in url_l:
-        return 1  # Verified seller
+    # Verified
+    if "official" in url_l or "flagship" in url_l or "verified" in url_l:
+        return 1
 
-    # Suspicious seller patterns
-    if ("seller" in url_l or "shop" in url_l) and ("id=" not in url_l and "i." not in url_l):
-        return 2  # Suspicious seller
+    # Suspicious
+    if "seller" in url_l and ("id=" not in url_l and "shop" not in url_l):
+        return 2
 
-    return 0  # Unknown / No seller
+    return 0
 
 
 # ---------------------------------------------------------
-# MAIN FEATURE EXTRACTOR
+# main
 # ---------------------------------------------------------
 def extract_all_features(url):
-
     u = str(url).strip()
     p, host = extract_host(u)
     path = p.path or "/"
@@ -181,7 +172,6 @@ def extract_all_features(url):
     f["prefix_suffix"] = int("-" in host)
     f["path_extension_php"] = int(path.endswith(".php"))
 
-    # Brand shared words
     tk_host = re.split(r"[\W_]+", host)
     tk_path = re.split(r"[\W_]+", path)
     common = set(t for t in tk_host if len(t) > 2).intersection(
@@ -205,7 +195,6 @@ def extract_all_features(url):
     f["subdomain_count"] = host.count(".")
     f["suspicious_subdomain"] = int(f["subdomain_count"] >= 3)
 
-    # entropy
     def entropy(s):
         import math
         prob = [s.count(c)/len(s) for c in dict.fromkeys(s)]
@@ -220,7 +209,7 @@ def extract_all_features(url):
         "promo","discount","freegift","bonus","offer","deal"
     ]))
 
-    # ------------ LIVE / FAST MODE ------------
+    # ------------ LIVE ------------
     if FAST_MODE or TRAIN_MODE:
         f.update({
             "ssl_valid": 1,
@@ -237,6 +226,7 @@ def extract_all_features(url):
             "empty_title": 0,
             "web_traffic": 100,
         })
+
     else:
         f["ssl_valid"] = safe_ssl(host)
         f["domain_age_days"] = safe_whois(host)
@@ -271,7 +261,7 @@ def extract_all_features(url):
         f["vt_detection_ratio"] = 0.0
 
     # ---------------------------------------------------------
-    # Marketplace + Seller + Domain Exists
+    # Marketplace & Seller & Domain Exists
     # ---------------------------------------------------------
     f["uses_https"] = int(u.startswith("https://"))
     f["marketplace_type"] = detect_marketplace(host)
@@ -279,7 +269,7 @@ def extract_all_features(url):
     f["domain_exists"] = check_dns_exists(host)
 
     # ---------------------------------------------------------
-    # FIXED FEATURE ORDER — SAME AS OLD MODEL
+    # FIXED ORDER
     # ---------------------------------------------------------
     expected = [
         "length_url","length_hostname","nb_dots","nb_hyphens","nb_numeric_chars",
