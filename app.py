@@ -35,6 +35,7 @@ def get_db():
         autocommit=True
     )
 
+
 @app.route("/db_test")
 def db_test():
     try:
@@ -45,6 +46,7 @@ def db_test():
         return {"db": "connected", "rows": count}
     except Exception as e:
         return {"db": "error", "error": str(e)}
+
 
 # --------------------------------------------------
 # Root Check
@@ -57,8 +59,9 @@ def root():
         "fast_mode": os.getenv("FAST_MODE", "0")
     })
 
+
 # --------------------------------------------------
-# /predict
+# /predict  (RESTORED VERSION)
 # --------------------------------------------------
 @app.route("/predict", methods=["POST"])
 def predict():
@@ -85,7 +88,6 @@ def predict():
             try:
                 db = get_db()
                 cursor = db.cursor()
-
                 cursor.execute(
                     """
                     INSERT INTO scan_results (user_id, shopping_url, trust_score, scanned_at)
@@ -93,10 +95,8 @@ def predict():
                     """,
                     (user_id, url, trust_score)
                 )
-
                 cursor.close()
                 db.close()
-
             except Exception as db_err:
                 print("[DB ERROR]", db_err)
 
