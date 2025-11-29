@@ -100,7 +100,7 @@ def check_dns_exists(host):
 
 
 # ---------------------------------------------------------
-# Marketplace Detector ONLY (SAFE)
+# Marketplace Detector
 # ---------------------------------------------------------
 def detect_marketplace(host):
     if "shopee.com" in host: return 1
@@ -110,8 +110,28 @@ def detect_marketplace(host):
     if "facebook.com" in host: return 5
     return 0
 
+
 # ---------------------------------------------------------
-# main
+# Seller Detector (SAFE, no ML impact)
+# ---------------------------------------------------------
+def detect_seller_status(url_l, marketplace_type):
+    if marketplace_type == 0:
+        return 0  # non-marketplace → don't show seller
+
+    # ⭐ VERIFIED
+    if "official" in url_l or "flagship" in url_l:
+        return 1
+
+    # ⭐ NORMAL SELLER
+    if "shop" in url_l or "seller" in url_l or "store" in url_l:
+        return 0
+
+    # ⭐ UNKNOWN (default)
+    return 0
+
+
+# ---------------------------------------------------------
+# MAIN EXTRACTOR
 # ---------------------------------------------------------
 def extract_all_features(url):
     u = str(url).strip()
@@ -121,7 +141,7 @@ def extract_all_features(url):
 
     f = {}
 
-    # ------------ BASIC ------------    
+    # ------------ BASIC FEATURES (ML ORIGINAL) ------------
     f["length_url"] = len(u)
     f["length_hostname"] = len(host)
     f["nb_dots"] = host.count(".")
@@ -135,14 +155,10 @@ def extract_all_features(url):
     f["contains_scam_keyword"] = int(any(w in url_l for w in scamwords))
 
     for sym, name in [
-        ("@", "nb_at"),
-        ("?", "nb_qm"),
-        ("&", "nb_and"),
-        ("_", "nb_underscore"),
-        ("~", "nb_tilde"),
-        ("%", "nb_percent"),
-        ("/", "nb_slash"),
-        ("#", "nb_hash"),
+        ("@", "nb_at"), ("?", "nb_qm"), ("&", "nb_and"),
+        ("_", "nb_underscore"), ("~", "nb_tilde"),
+        ("%", "nb_percent"), ("/", "nb_slash"),
+        ("#", "nb_hash")
     ]:
         f[name] = u.count(sym)
 
@@ -154,6 +170,7 @@ def extract_all_features(url):
     f["prefix_suffix"] = int("-" in host)
     f["path_extension_php"] = int(path.endswith(".php"))
 
+    # brand repetition
     tk_host = re.split(r"[\W_]+", host)
     tk_path = re.split(r"[\W_]+", path)
     common = set(t for t in tk_host if len(t) > 2).intersection(
@@ -166,11 +183,13 @@ def extract_all_features(url):
     f["ratio_digits_url"] = (sum(c.isdigit() for c in u) / max(1, len(u))) * 100
     f["ratio_digits_host"] = (sum(c.isdigit() for c in host) / max(1, len(host))) * 100
 
-    # ------------ NEW FEATURES ------------    
+    # ------------ NEW FEATURES (SAFE) ------------
     tld = host.split(".")[-1]
     f["suspicious_tld"] = int(tld in {"top","xyz","win","tk","ml","gq","ru","vip","live"})
-    f["brand_mismatch"] = int(any(b in url_l and b not in host for b in
-        ["paypal","google","apple","amazon","microsoft","bank","meta"]))
+
+    brands = ["paypal","google","apple","amazon","microsoft","bank","meta"]
+    f["brand_mismatch"] = int(any(b in url_l and b not in host for b in brands))
+
     f["double_hyphen"] = int("--" in host)
     f["subdomain_count"] = host.count(".")
     f["suspicious_subdomain"] = int(f["subdomain_count"] >= 3)
@@ -188,7 +207,7 @@ def extract_all_features(url):
         "promo","discount","freegift","bonus","offer","deal"
     ]))
 
-    # ------------ LIVE MODE ------------    
+    # ------------ LIVE MODE HTML PARSE ------------
     if FAST_MODE or TRAIN_MODE:
         f.update({
             "ssl_valid": 1,
@@ -216,37 +235,40 @@ def extract_all_features(url):
         if soup:
             f["iframe_present"] = int(bool(soup.find_all("iframe")))
             f["login_form"] = int(bool(soup.find_all("input", {"type": "password"})))
-
             txt = soup.get_text(" ", strip=True).lower()
             f["popup_window"] = int("popup" in txt or "modal" in txt)
-            f["right_click_disabled"] = int("oncontextmenu" in (html.lower() if html else ""))
-
+            f["right_click_disabled"] = int("oncontextmenu" in html.lower())
             title = soup.title.string.strip() if soup.title else ""
             f["empty_title"] = int(title == "")
 
             wc = len(re.findall(r"\w+", txt))
             f["web_traffic"] = 1000 if wc > 2000 else 500 if wc > 500 else 100 if wc > 100 else 10
         else:
-            f["iframe_present"] = 0
-            f["login_form"] = 0
-            f["popup_window"] = 0
-            f["right_click_disabled"] = 0
-            f["empty_title"] = 0
-            f["web_traffic"] = 100
+            f.update({
+                "iframe_present": 0,
+                "login_form": 0,
+                "popup_window": 0,
+                "right_click_disabled": 0,
+                "empty_title": 0,
+                "web_traffic": 100
+            })
 
-        # VT fields neutral (your predictor handles real VT)
+        # VT fields kept neutral (predictor handles real VT)
         f["vt_total_vendors"] = 0
         f["vt_malicious_count"] = 0
         f["vt_detection_ratio"] = 0.0
 
-    # Marketplace only (SAFE)
+    # ---------------------------------------------------------
+    # Marketplace (SAFE) + Seller (SAFE) + Domain Exists
+    # ---------------------------------------------------------
     f["marketplace_type"] = detect_marketplace(host)
 
-    # Domain exists
+    f["seller_status"] = detect_seller_status(url_l, f["marketplace_type"])
+
     f["domain_exists"] = check_dns_exists(host)
 
     # ---------------------------------------------------------
-    # FIXED ORDER — EXACT SAME AS OLD MODEL + marketplace & domain_exists LAST
+    # FIXED FEATURE ORDER (VERY IMPORTANT)
     # ---------------------------------------------------------
     expected = [
         "length_url","length_hostname","nb_dots","nb_hyphens","nb_numeric_chars",
@@ -265,30 +287,12 @@ def extract_all_features(url):
         "right_click_disabled","empty_title","web_traffic",
 
         "marketplace_type",
+        "seller_status",
         "domain_exists"
     ]
-# ---------------------------------------------------------
-# Seller status (Marketplace only)
-# 0 = unknown
-# 1 = verified / official
-# ---------------------------------------------------------
-f["seller_status"] = 0  # default
-
-if f["marketplace_type"] != 0:  # only run seller logic on Shopee/Lazada/etc.
-    # Verified sellers
-    if "official" in url_l or "flagship" in url_l or "verified" in url_l:
-        f["seller_status"] = 1
-
-    # Normal sellers
-    elif "shop" in url_l or "seller" in url_l or "store" in url_l:
-        f["seller_status"] = 0
-
-    # Otherwise unknown (still 0)
 
     for k in expected:
         f.setdefault(k, 0)
 
     f["url"] = u
     return f
-
-
