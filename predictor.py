@@ -10,7 +10,7 @@ from typing import Dict, Any, Tuple
 import numpy as np
 import pandas as pd
 
-# optional XGBoost support
+# optional xgboost
 HAS_XGB = True
 try:
     from xgboost import XGBClassifier
@@ -29,7 +29,7 @@ VT_API_KEY = os.environ.get("VT_API_KEY")
 GSB_API_KEY = os.environ.get("GSB_API_KEY")
 FAST_MODE = os.environ.get("FAST_MODE", "0") == "1"
 
-# Simple in-memory cache for VT/GSB results
+# simple in-memory cache for VT/GSB
 _CACHE: Dict[str, tuple] = {}
 def cache_get(k: str, max_age: int = 3600):
     v = _CACHE.get(k)
@@ -42,7 +42,6 @@ def cache_set(k: str, v: Any):
     _CACHE[k] = (time.time(), v)
 
 
-# ---------------- helpers for loading models ----------------
 class ModelLoadError(Exception):
     pass
 
@@ -58,22 +57,20 @@ def load_xgb_model(path: str):
     return m
 
 
-# ---------------- Predictor ----------------
 class Predictor:
     def __init__(self):
         self.models: Dict[str, Any] = {}
         self.feature_names = []
         self._loaded = False
 
-        # default blending weights (adjust via ENV if needed)
-        # by default ml=0.60, vt=0.35, gsb=0.05
+        # defaults (can override via env)
         self.weights = {
             "ml": float(os.getenv("ML_WEIGHT", 0.60)),
             "vt": float(os.getenv("VT_WEIGHT", 0.35)),
             "gsb": float(os.getenv("GSB_WEIGHT", 0.05)),
         }
 
-        # if sum > 1, normalize
+        # normalize if sum > 1
         s = sum(self.weights.values())
         if s > 1:
             for k in self.weights:
@@ -110,18 +107,14 @@ class Predictor:
             self._loaded = True
             logger.info("Models loaded (features=%d) (HAS_XGB=%s) (FAST_MODE=%s)",
                         len(self.feature_names), bool(xgb), FAST_MODE)
+
         except Exception as e:
             logger.exception("Failed loading models")
             raise ModelLoadError(str(e))
 
-
-    # ------------------ External checks (VT / GSB) ------------------
+    # ---------------- external VT/GSB checks ----------------
     def vt_domain_report(self, domain: str) -> Tuple[int, int, float]:
-        """
-        Return (total_vendors, malicious_count, ratio).
-        If FAST_MODE or no API key => return neutral (0,0,0.0).
-        Caches responses for performance.
-        """
+        """Return (total_vendors, malicious_count, ratio). Neutral if FAST_MODE or no API key."""
         if FAST_MODE or not VT_API_KEY:
             return 0, 0, 0.0
 
@@ -144,15 +137,11 @@ class Predictor:
         except Exception as e:
             logger.debug("VT request failed for %s: %s", domain, e)
 
-        # fallback neutral
         cache_set(key, {"total": 0, "mal": 0, "ratio": 0.0})
         return 0, 0, 0.0
 
     def check_gsb(self, url: str) -> bool:
-        """
-        Return True if Google Safe Browsing flags the URL.
-        Fallback False if FAST_MODE or missing API key.
-        """
+        """Return True if GSB flags the url. Fallback False."""
         if FAST_MODE or not GSB_API_KEY:
             return False
 
@@ -183,13 +172,9 @@ class Predictor:
             cache_set(key, False)
             return False
 
-
-    # ------------------ live component ------------------------------
+    # ---------------- live scoring ----------------
     def _live_component(self, feats: dict) -> float:
-        """
-        Convert live signals (domain_age_days, web_traffic, ssl_valid, quad9_blocked)
-        to a [0,1] score. Used as leftover weight in combination.
-        """
+        """Normalized [0,1] live score using domain age, traffic, ssl, quad9."""
         if FAST_MODE:
             age = int(feats.get("domain_age_days", 365))
             traffic = int(feats.get("web_traffic", 100))
@@ -231,37 +216,26 @@ class Predictor:
         score = max(0.05, min(score, 2.5))
         return score / 2.5
 
-
-    # -------- stable deterministic pseudo-random integer within range --------
     def stable_random(self, key: str, min_v: int, max_v: int) -> int:
+        """Deterministic pseudo-random int for stable presentation."""
         if not key:
             key = "default"
         base = abs(hash(key)) % 1000000
         return min_v + (base % (max_v - min_v + 1))
 
-
-    # ------------------ main prediction -----------------------
+    # ---------------- prediction ----------------
     def predict_from_features(self, feats: dict, models_obj=None, raw_url: str = None) -> Dict[str, Any]:
-        """
-        feats: dict of feature_name -> value (should include the features listed in features.pkl)
-        models_obj: optional predictor instance (ignored normally)
-        raw_url: the original URL string (used for VT/GSB/domain extraction)
-        """
-
         self.load_models()
         if raw_url is None:
             raw_url = feats.get("url", "")
 
-        # Build ordered vector matching features.pkl
+        # Build ordered vector
         X_vec = [float(feats.get(f, 0.0)) for f in self.feature_names]
         X_df = pd.DataFrame([X_vec], columns=self.feature_names)
 
-        # base model probabilities (malicious probability)
+        # model probabilities (malicious)
         try:
-            if self.models.get("xgb") is not None:
-                p_xgb = float(self.models["xgb"].predict_proba(X_df)[0][1])
-            else:
-                p_xgb = 0.5
+            p_xgb = float(self.models["xgb"].predict_proba(X_df)[0][1]) if self.models.get("xgb") is not None else 0.5
         except Exception as e:
             logger.warning("xgb predict_proba failed: %s", e)
             p_xgb = 0.5
@@ -272,27 +246,23 @@ class Predictor:
             logger.warning("rf predict_proba failed: %s", e)
             p_rf = 0.5
 
-        # stacker meta-prediction combining RF/XGB
         try:
             meta = np.asarray([[p_xgb, p_rf]])
             p_final = float(self.models["stacker"].predict_proba(meta)[0][1])
         except Exception as e:
-            logger.warning("stacker predict failed: %s — falling back to average", e)
+            logger.warning("stacker predict failed: %s — fallback average", e)
             p_final = float((p_xgb + p_rf) / 2.0)
 
-        # Convert malicious probability -> ml_component (higher=trustworthy)
         ml_mal_prob = min(max(p_final, 0.0), 1.0)
         ml_component = 1.0 - ml_mal_prob
 
-        # Parse domain for VT
         parsed = urllib.parse.urlparse(raw_url)
         domain = (parsed.netloc or raw_url).lower().split(":")[0]
 
-        # External signals
         vt_total, vt_mal, vt_ratio = self.vt_domain_report(domain)
         gsb_hit = self.check_gsb(raw_url)
 
-        # VT -> component mapping (neutral when unknown)
+        # vt_component: translate VT stats -> component in [0,1] (higher = more trustworthy)
         if vt_total == 0:
             vt_component = 1.0
         elif 0 < vt_total < 5:
@@ -304,12 +274,11 @@ class Predictor:
         live_component = float(self._live_component(feats))
         stable_key = domain or raw_url
 
-        # ------------------ Hard overrides ------------------
-        # Domain existence (from features) -> immediate phishing if missing
+        # DOMAIN EXISTENCE
         domain_exists = int(feats.get("domain_exists", 1))
         if domain_exists == 0:
             score = self.stable_random(stable_key, 1, 10)
-            logger.info("Domain missing override: domain=%s exists=%s score=%d", domain, domain_exists, score)
+            logger.info("Domain missing override (%s) -> score=%d", domain, score)
             return {
                 "trust_score": score,
                 "label": "PHISHING",
@@ -319,15 +288,14 @@ class Predictor:
                 "gsb_match": bool(gsb_hit),
                 "live_component": round(live_component, 4),
                 "domain_exists": domain_exists,
-                "weights": {"ml": self.weights.get("ml"), "vt": self.weights.get("vt"), "gsb": self.weights.get("gsb")}
+                "weights": self.weights
             }
 
-        # GSB override => immediate phishing
+        # GSB override
         if gsb_hit:
-            logger.info("GSB override: marking PHISHING (url=%s)", raw_url)
-            score = 2
+            logger.info("GSB override (url=%s) -> PHISHING", raw_url)
             return {
-                "trust_score": score,
+                "trust_score": 2,
                 "label": "PHISHING",
                 "override": "gsb",
                 "model_probs": {"xgb": p_xgb, "rf": p_rf, "ml_final": p_final},
@@ -335,13 +303,13 @@ class Predictor:
                 "gsb_match": True,
                 "live_component": round(live_component, 4),
                 "domain_exists": domain_exists,
-                "weights": {"ml": self.weights.get("ml"), "vt": self.weights.get("vt"), "gsb": self.weights.get("gsb")}
+                "weights": self.weights
             }
 
-        # VT decisive malicious overrides
+        # VT severe malicious -> immediate PHISHING
         if vt_mal >= 6:
             score = self.stable_random(stable_key, 1, 49)
-            logger.info("VT severe malicious override (domain=%s mal=%d) score=%d", domain, vt_mal, score)
+            logger.info("VT severe (%s) mal=%d -> score=%d", domain, vt_mal, score)
             return {
                 "trust_score": score,
                 "label": "PHISHING",
@@ -351,12 +319,13 @@ class Predictor:
                 "gsb_match": False,
                 "live_component": round(live_component, 4),
                 "domain_exists": domain_exists,
-                "weights": {"ml": self.weights.get("ml"), "vt": self.weights.get("vt"), "gsb": self.weights.get("gsb")}
+                "weights": self.weights
             }
 
+        # VT 1..5 malicious -> SUSPICIOUS
         if 1 <= vt_mal <= 5:
             score = self.stable_random(stable_key, 50, 69)
-            logger.info("VT suspicious vendors (domain=%s mal=%d) score=%d", domain, vt_mal, score)
+            logger.info("VT suspicious (%s) mal=%d -> score=%d", domain, vt_mal, score)
             return {
                 "trust_score": score,
                 "label": "SUSPICIOUS",
@@ -366,13 +335,11 @@ class Predictor:
                 "gsb_match": False,
                 "live_component": round(live_component, 4),
                 "domain_exists": domain_exists,
-                "weights": {"ml": self.weights.get("ml"), "vt": self.weights.get("vt"), "gsb": self.weights.get("gsb")}
+                "weights": self.weights
             }
 
-        # ------------------ VT clean (0 malicious) path (VT-preferred) ------------------
-        # When vt_mal == 0 we reduce ML influence and favor VT + live
+        # VT CLEAN PATH (vt_mal == 0) -> prefer VT and live signals, reduce ML influence
         if vt_mal == 0:
-            # reduce ML influence; increase VT influence
             w_ml_vtclean = max(0.05, min(0.25, self.weights.get("ml") * 0.35))
             w_vt_vtclean = max(0.6, min(0.9, self.weights.get("vt") + 0.25))
             w_gsb = self.weights.get("gsb", 0.05)
@@ -387,32 +354,31 @@ class Predictor:
             vt_pref_combined = min(max(vt_pref_combined, 0.0), 1.0)
             trust_score = round(vt_pref_combined * 100.0, 2)
 
-            # seller & marketplace adjustments (from features)
-            seller_status = int(feats.get("seller_status", 0))   # 0 unknown,1 verified,2 suspicious
-            marketplace_type = int(feats.get("marketplace_type", 0))  # 0 unknown, >0 marketplace
+            seller_status = int(feats.get("seller_status", 0))
+            marketplace_type = int(feats.get("marketplace_type", 0))
 
             if marketplace_type != 0:
-                if seller_status == 1:   # verified
+                if seller_status == 1:
                     trust_score = max(trust_score, 80)
-                elif seller_status == 0: # unknown seller -> small penalty
+                elif seller_status == 0:
                     trust_score = max(0.0, trust_score - 10.0)
-                elif seller_status == 2: # suspicious seller -> stronger penalty
+                elif seller_status == 2:
                     trust_score = max(0.0, trust_score - 20.0)
 
-            # domain existence again (safety)
             if domain_exists == 0:
                 trust_score = min(trust_score, 49)
 
-            # stabilize with deterministic random to give varied but reproducible scores
+            # produce a stable, slightly varied integer in a small range so different URLs produce different but stable scores
             if trust_score >= 50:
-                trust_score = int(self.stable_random(stable_key, max(50, int(trust_score)), min(100, max(50, int(trust_score) + 5))))
+                ts_int = int(self.stable_random(stable_key, max(50, int(trust_score)), min(100, max(50, int(trust_score) + 5))))
             else:
-                trust_score = int(self.stable_random(stable_key, 50, 69))
+                ts_int = int(self.stable_random(stable_key, 50, 69))
 
-            label = "LEGITIMATE" if trust_score >= 75 else "SUSPICIOUS" if trust_score >= 50 else "PHISHING"
-            logger.info("VT-clean path (domain=%s) trust=%s label=%s seller=%s marketplace=%s", domain, trust_score, label, seller_status, marketplace_type)
+            label = "LEGITIMATE" if ts_int >= 75 else "SUSPICIOUS" if ts_int >= 50 else "PHISHING"
+            logger.info("VT-clean prefer (%s) -> trust=%s label=%s seller=%s mp=%s", domain, ts_int, label, seller_status, marketplace_type)
+
             return {
-                "trust_score": trust_score,
+                "trust_score": ts_int,
                 "label": label,
                 "override": "vt_clean_prefer",
                 "model_probs": {"xgb": p_xgb, "rf": p_rf, "ml_final": p_final},
@@ -425,7 +391,7 @@ class Predictor:
                 "weights": {"ml": w_ml_vtclean, "vt": w_vt_vtclean, "gsb": w_gsb, "leftover": leftover}
             }
 
-        # ------------------ Default weighted combination ------------------
+        # fallback weighted combine
         w_ml = self.weights.get("ml", 0.60)
         w_vt = self.weights.get("vt", 0.35)
         w_gsb = self.weights.get("gsb", 0.05)
@@ -440,7 +406,6 @@ class Predictor:
         combined = min(max(combined, 0.0), 1.0)
         trust_score = round(combined * 100.0, 2)
 
-        # apply seller adjustments when marketplace link detected
         seller_status = int(feats.get("seller_status", 0))
         marketplace_type = int(feats.get("marketplace_type", 0))
 
@@ -469,7 +434,7 @@ class Predictor:
             "gsb_match": bool(gsb_hit),
             "seller_status": int(feats.get("seller_status", 0)),
             "marketplace_type": int(feats.get("marketplace_type", 0)),
-            "domain_exists": int(domain_exists),
+            "domain_exists": int(feats.get("domain_exists", 1)),
             "live_component": round(live_component, 4),
             "weights": {"ml": w_ml, "vt": w_vt, "gsb": w_gsb, "leftover": leftover},
             "breakdown": {
@@ -481,7 +446,6 @@ class Predictor:
         }
 
 
-# ---------------- global helpers ----------------
 _GLOBAL_PREDICTOR: Predictor | None = None
 
 def load_models():
@@ -492,9 +456,6 @@ def load_models():
     return _GLOBAL_PREDICTOR
 
 def predict_from_features(features: dict, models_obj=None, raw_url: str | None = None):
-    """
-    Wrapper used by app.py: `predict_from_features(features, models, raw_url=url)`
-    """
     if hasattr(models_obj, "predict_from_features"):
         return models_obj.predict_from_features(features, raw_url=raw_url)
     pred = load_models()
