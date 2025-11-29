@@ -6,37 +6,55 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 import mysql.connector
 
-# Load environment
+# Load .env (Railway loads automatically)
 load_dotenv()
 
 # ML imports
 from predictor import load_models, predict_from_features
 from url_feature_extractor import extract_all_features
 
-# --------------------------------------------------
+# ---------------------------------------------
 # Flask Init
-# --------------------------------------------------
+# ---------------------------------------------
 app = Flask(__name__)
 CORS(app)
 
-# Load ML models once on startup
+# Load ML models once (IMPORTANT!)
 models = load_models()
 
-# --------------------------------------------------
-# DB Helper
-# --------------------------------------------------
+# ---------------------------------------------
+# Database Connection (OLD working format)
+# ---------------------------------------------
 def get_db():
-    return mysql.connector.connect(
-        host=os.getenv("DB_HOST"),
-        user=os.getenv("DB_USER"),
-        password=os.getenv("DB_PASS"),
-        database=os.getenv("DB_NAME"),
-        autocommit=True
-    )
+    try:
+        return mysql.connector.connect(
+            host=os.getenv("DB_HOST"),        # mysql.railway.internal
+            user=os.getenv("DB_USER"),        # root
+            password=os.getenv("DB_PASS"),    # your password
+            database=os.getenv("DB_NAME"),    # railway
+            port=os.getenv("DB_PORT", 3306),  # 3306
+            autocommit=True
+        )
+    except Exception as e:
+        print("❌ DB CONNECTION FAILED:", e)
+        raise e
 
-# --------------------------------------------------
-# Root Check
-# --------------------------------------------------
+
+@app.route("/db_test")
+def db_test():
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        cursor.execute("SELECT COUNT(*) FROM scan_results;")
+        count = cursor.fetchone()[0]
+        return {"db": "connected", "rows": count}
+    except Exception as e:
+        return {"db": "error", "error": str(e)}
+
+
+# ---------------------------------------------
+# API Root
+# ---------------------------------------------
 @app.route("/", methods=["GET"])
 def root():
     return jsonify({
@@ -45,9 +63,10 @@ def root():
         "fast_mode": os.getenv("FAST_MODE", "0")
     })
 
-# --------------------------------------------------
+
+# ---------------------------------------------
 # /predict
-# --------------------------------------------------
+# ---------------------------------------------
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
@@ -59,20 +78,21 @@ def predict():
         user_id = data.get("user_id")
 
         if not url:
-            return jsonify({"error": "Missing 'url' field"}), 400
+            return jsonify({"error": "Missing 'url'"}), 400
 
-        # 1) Extract features
+        # Extract features
         features = extract_all_features(url)
 
-        # 2) ML prediction
+        # ML prediction
         result = predict_from_features(features, models, raw_url=url)
         trust_score = result.get("trust_score", 0)
 
-        # 3) Save result if user is logged in
+        # Save to DB if logged-in user
         if user_id:
             try:
                 db = get_db()
                 cursor = db.cursor()
+
                 cursor.execute(
                     """
                     INSERT INTO scan_results (user_id, shopping_url, trust_score, scanned_at)
@@ -80,12 +100,12 @@ def predict():
                     """,
                     (user_id, url, trust_score)
                 )
+
                 cursor.close()
                 db.close()
             except Exception as db_err:
-                print("[DB ERROR]", db_err)
+                print("❌ DB insert error:", db_err)
 
-        # 4) Return everything to frontend
         return jsonify({
             "url": url,
             "features": features,
@@ -97,13 +117,14 @@ def predict():
         return jsonify({"error": str(e)}), 500
 
 
-# --------------------------------------------------
-# /history - User history
-# --------------------------------------------------
+# ---------------------------------------------
+# /history
+# ---------------------------------------------
 @app.route("/history", methods=["GET"])
 def history():
     try:
         user_id = request.args.get("user_id")
+
         if not user_id:
             return jsonify({"error": "Missing user_id"}), 400
 
@@ -131,9 +152,9 @@ def history():
         return jsonify({"error": str(e)}), 500
 
 
-# --------------------------------------------------
-# /scan_results - Admin view
-# --------------------------------------------------
+# ---------------------------------------------
+# /scan_results (Admin)
+# ---------------------------------------------
 @app.route("/scan_results", methods=["GET"])
 def scan_results():
     try:
@@ -160,10 +181,10 @@ def scan_results():
         return jsonify({"error": str(e)}), 500
 
 
-# --------------------------------------------------
-# Run Application (Local)
-# --------------------------------------------------
+# ---------------------------------------------
+# App Run
+# ---------------------------------------------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
-    print(f"🚀 SmellScam API running on port {port}")
+    print(f"🚀 SmellScam ML API running on port {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
