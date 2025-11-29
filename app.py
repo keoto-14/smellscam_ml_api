@@ -13,7 +13,6 @@ load_dotenv()
 from predictor import load_models, predict_from_features
 from url_feature_extractor import extract_all_features
 
-
 # --------------------------------------------------
 # Flask Init
 # --------------------------------------------------
@@ -23,12 +22,11 @@ CORS(app)
 # Load ML models once
 models = load_models()
 
-
 # --------------------------------------------------
-# DB Helper (NO CHANGES)
+# DB Helper
 # --------------------------------------------------
 def get_db():
-    """Return MySQL connection (same as old working version)."""
+    """Fast, clean MySQL connector instance."""
     return mysql.connector.connect(
         host=os.getenv("DB_HOST"),
         user=os.getenv("DB_USER"),
@@ -36,7 +34,6 @@ def get_db():
         database=os.getenv("DB_NAME"),
         autocommit=True
     )
-
 
 @app.route("/db_test")
 def db_test():
@@ -49,7 +46,6 @@ def db_test():
     except Exception as e:
         return {"db": "error", "error": str(e)}
 
-
 # --------------------------------------------------
 # Root Check
 # --------------------------------------------------
@@ -61,9 +57,8 @@ def root():
         "fast_mode": os.getenv("FAST_MODE", "0")
     })
 
-
 # --------------------------------------------------
-# /predict (RESTORED)
+# /predict
 # --------------------------------------------------
 @app.route("/predict", methods=["POST"])
 def predict():
@@ -117,7 +112,7 @@ def predict():
 
 
 # --------------------------------------------------
-# /history  (NO CHANGES)
+# /history
 # --------------------------------------------------
 @app.route("/history", methods=["GET"])
 def history():
@@ -151,7 +146,7 @@ def history():
 
 
 # --------------------------------------------------
-# /scan_results  (NO CHANGES)
+# /scan_results (admin)
 # --------------------------------------------------
 @app.route("/scan_results", methods=["GET"])
 def scan_results():
