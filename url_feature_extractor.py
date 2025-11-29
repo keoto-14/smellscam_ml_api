@@ -100,7 +100,7 @@ def check_dns_exists(host):
 
 
 # ---------------------------------------------------------
-# Marketplace Detector
+# Marketplace Detector ONLY (SAFE)
 # ---------------------------------------------------------
 def detect_marketplace(host):
     if "shopee.com" in host: return 1
@@ -108,23 +108,6 @@ def detect_marketplace(host):
     if "temu.com" in host: return 3
     if "tiktok.com" in host: return 4
     if "facebook.com" in host: return 5
-    return 0
-
-
-# ---------------------------------------------------------
-# Seller Detector
-# ---------------------------------------------------------
-def detect_seller_status(url, host):
-    url_l = url.lower()
-
-    # Verified
-    if "official" in url_l or "flagship" in url_l or "verified" in url_l:
-        return 1
-
-    # Suspicious
-    if "seller" in url_l and ("id=" not in url_l and "shop" not in url_l):
-        return 2
-
     return 0
 
 
@@ -139,7 +122,7 @@ def extract_all_features(url):
 
     f = {}
 
-    # ------------ BASIC ------------
+    # ------------ BASIC ------------    
     f["length_url"] = len(u)
     f["length_hostname"] = len(host)
     f["nb_dots"] = host.count(".")
@@ -184,13 +167,11 @@ def extract_all_features(url):
     f["ratio_digits_url"] = (sum(c.isdigit() for c in u) / max(1, len(u))) * 100
     f["ratio_digits_host"] = (sum(c.isdigit() for c in host) / max(1, len(host))) * 100
 
-    # ------------ NEW FEATURES ------------
+    # ------------ NEW FEATURES ------------    
     tld = host.split(".")[-1]
     f["suspicious_tld"] = int(tld in {"top","xyz","win","tk","ml","gq","ru","vip","live"})
-
-    brands = ["paypal","google","apple","amazon","microsoft","bank","meta"]
-    f["brand_mismatch"] = int(any(b in url_l and b not in host for b in brands))
-
+    f["brand_mismatch"] = int(any(b in url_l and b not in host for b in
+        ["paypal","google","apple","amazon","microsoft","bank","meta"]))
     f["double_hyphen"] = int("--" in host)
     f["subdomain_count"] = host.count(".")
     f["suspicious_subdomain"] = int(f["subdomain_count"] >= 3)
@@ -204,12 +185,11 @@ def extract_all_features(url):
     f["free_hosting"] = int(any(h in host for h in [
         "wixsite.com","weebly.com","000webhost","github.io","webflow.io","blogspot.com"
     ]))
-
     f["keyword_suspect"] = int(any(k in url_l for k in [
         "promo","discount","freegift","bonus","offer","deal"
     ]))
 
-    # ------------ LIVE ------------
+    # ------------ LIVE MODE ------------    
     if FAST_MODE or TRAIN_MODE:
         f.update({
             "ssl_valid": 1,
@@ -226,7 +206,6 @@ def extract_all_features(url):
             "empty_title": 0,
             "web_traffic": 100,
         })
-
     else:
         f["ssl_valid"] = safe_ssl(host)
         f["domain_age_days"] = safe_whois(host)
@@ -256,20 +235,19 @@ def extract_all_features(url):
             f["empty_title"] = 0
             f["web_traffic"] = 100
 
+        # VT fields neutral (your predictor handles real VT)
         f["vt_total_vendors"] = 0
         f["vt_malicious_count"] = 0
         f["vt_detection_ratio"] = 0.0
 
-    # ---------------------------------------------------------
-    # Marketplace & Seller & Domain Exists
-    # ---------------------------------------------------------
-    f["uses_https"] = int(u.startswith("https://"))
+    # Marketplace only (SAFE)
     f["marketplace_type"] = detect_marketplace(host)
-    f["seller_status"] = detect_seller_status(u, host)
+
+    # Domain exists
     f["domain_exists"] = check_dns_exists(host)
 
     # ---------------------------------------------------------
-    # FIXED ORDER
+    # FIXED ORDER — EXACT SAME AS OLD MODEL + marketplace & domain_exists LAST
     # ---------------------------------------------------------
     expected = [
         "length_url","length_hostname","nb_dots","nb_hyphens","nb_numeric_chars",
@@ -287,9 +265,7 @@ def extract_all_features(url):
         "login_form","iframe_present","popup_window",
         "right_click_disabled","empty_title","web_traffic",
 
-        "uses_https",
         "marketplace_type",
-        "seller_status",
         "domain_exists"
     ]
 
