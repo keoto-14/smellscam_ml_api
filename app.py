@@ -66,7 +66,7 @@ def root():
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
-        data = request.get_json(silent=True)
+        data = request.get_json(force=True)
         if not data:
             return jsonify({"error": "Invalid JSON body"}), 400
 
