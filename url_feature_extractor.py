@@ -261,11 +261,17 @@ def extract_all_features(url):
     # ---------------------------------------------------------
     # Marketplace (SAFE) + Seller (SAFE) + Domain Exists
     # ---------------------------------------------------------
-    f["marketplace_type"] = detect_marketplace(host)
+   f["marketplace_type"] = detect_marketplace(host)
 
-    f["seller_status"] = detect_seller_status(url_l, f["marketplace_type"])
+    # SELLER — only apply if marketplace detected
+    if f["marketplace_type"] != 0:
+        f["seller_status"] = detect_seller_status(url_l, host)
+    else:
+        f["seller_status"] = 0
 
+    # DNS existence (VERY IMPORTANT for predictor)
     f["domain_exists"] = check_dns_exists(host)
+
 
     # ---------------------------------------------------------
     # FIXED FEATURE ORDER (VERY IMPORTANT)
@@ -296,3 +302,4 @@ def extract_all_features(url):
 
     f["url"] = u
     return f
+
