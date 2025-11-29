@@ -11,17 +11,25 @@ urllib3.disable_warnings()
 FAST_MODE = os.environ.get("FAST_MODE", "0") == "1"
 TRAIN_MODE = os.environ.get("TRAIN_MODE", "0") == "1"
 
-try: import requests
-except: requests = None
+try:
+    import requests
+except:
+    requests = None
 
-try: from bs4 import BeautifulSoup
-except: BeautifulSoup = None
+try:
+    from bs4 import BeautifulSoup
+except:
+    BeautifulSoup = None
 
-try: import dns.resolver
-except: dns = None
+try:
+    import dns.resolver
+except:
+    dns = None
 
-try: import whois as pywhois
-except: pywhois = None
+try:
+    import whois as pywhois
+except:
+    pywhois = None
 
 
 # ---------------------------------------------------------
@@ -108,19 +116,19 @@ def detect_marketplace(host):
 # ---------------------------------------------------------
 def detect_seller_status(url_l, marketplace_type):
     if marketplace_type == 0:
-        return 0   # no seller for normal website
+        return 0  # non-marketplace, don't show seller
 
     if "official" in url_l or "flagship" in url_l:
-        return 1   # verified seller
+        return 1  # verified
 
     if "shop" in url_l or "seller" in url_l or "store" in url_l:
-        return 0   # normal seller
+        return 0  # normal seller
 
-    return 0       # default unknown
+    return 0  # unknown/default
 
 
 # ---------------------------------------------------------
-# MAIN FEATURE EXTRACTOR
+# MAIN Extractor
 # ---------------------------------------------------------
 def extract_all_features(url):
     u = str(url).strip()
@@ -130,7 +138,7 @@ def extract_all_features(url):
 
     f = {}
 
-    # ------------ BASIC ML FEATURES ------------
+    # ------------ BASIC FEATURES ------------
     f["length_url"] = len(u)
     f["length_hostname"] = len(host)
     f["nb_dots"] = host.count(".")
@@ -146,8 +154,7 @@ def extract_all_features(url):
     for sym, name in [
         ("@", "nb_at"), ("?", "nb_qm"), ("&", "nb_and"),
         ("_", "nb_underscore"), ("~", "nb_tilde"),
-        ("%", "nb_percent"), ("/", "nb_slash"),
-        ("#", "nb_hash")
+        ("%", "nb_percent"), ("/", "nb_slash"), ("#", "nb_hash")
     ]:
         f[name] = u.count(sym)
 
@@ -171,11 +178,13 @@ def extract_all_features(url):
     f["ratio_digits_url"] = (sum(c.isdigit() for c in u) / max(1, len(u))) * 100
     f["ratio_digits_host"] = (sum(c.isdigit() for c in host) / max(1, len(host))) * 100
 
-    # ------------ NEW SAFE FEATURES ------------
+    # ------------ NEW FEATURES ------------
     tld = host.split(".")[-1]
     f["suspicious_tld"] = int(tld in {"top","xyz","win","tk","ml","gq","ru","vip","live"})
+
     brands = ["paypal","google","apple","amazon","microsoft","bank","meta"]
     f["brand_mismatch"] = int(any(b in url_l and b not in host for b in brands))
+
     f["double_hyphen"] = int("--" in host)
     f["subdomain_count"] = host.count(".")
     f["suspicious_subdomain"] = int(f["subdomain_count"] >= 3)
@@ -186,6 +195,7 @@ def extract_all_features(url):
         return -sum(p * math.log(p, 2) for p in prob)
 
     f["entropy_url"] = entropy(u) if u else 0
+
     f["free_hosting"] = int(any(h in host for h in [
         "wixsite.com","weebly.com","000webhost","github.io","webflow.io","blogspot.com"
     ]))
@@ -193,7 +203,7 @@ def extract_all_features(url):
         "promo","discount","freegift","bonus","offer","deal"
     ]))
 
-    # ------------ LIVE HTML FEATURES ------------
+    # ------------ LIVE MODE ------------
     if FAST_MODE or TRAIN_MODE:
         f.update({
             "ssl_valid": 1,
@@ -226,7 +236,6 @@ def extract_all_features(url):
             f["right_click_disabled"] = int("oncontextmenu" in html.lower())
             title = soup.title.string.strip() if soup.title else ""
             f["empty_title"] = int(title == "")
-
             wc = len(re.findall(r"\w+", txt))
             f["web_traffic"] = 1000 if wc > 2000 else 500 if wc > 500 else 100 if wc > 100 else 10
         else:
@@ -243,12 +252,16 @@ def extract_all_features(url):
         f["vt_malicious_count"] = 0
         f["vt_detection_ratio"] = 0.0
 
-    # ------------ MARKETPLACE + SELLER + DNS ------------
+    # ---------------------------------------------------------
+    # Marketplace + Seller + Domain Exists
+    # ---------------------------------------------------------
     f["marketplace_type"] = detect_marketplace(host)
     f["seller_status"] = detect_seller_status(url_l, f["marketplace_type"])
     f["domain_exists"] = check_dns_exists(host)
 
-    # ------------ FIXED ORDER (VERY IMPORTANT) ------------
+    # ---------------------------------------------------------
+    # FIXED ORDER (MUST MATCH features.pkl)
+    # ---------------------------------------------------------
     expected = [
         "length_url","length_hostname","nb_dots","nb_hyphens","nb_numeric_chars",
         "contains_scam_keyword","nb_at","nb_qm","nb_and","nb_underscore",
