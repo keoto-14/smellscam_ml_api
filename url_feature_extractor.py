@@ -110,7 +110,6 @@ def detect_marketplace(host):
     if "facebook.com" in host: return 5
     return 0
 
-
 # ---------------------------------------------------------
 # main
 # ---------------------------------------------------------
@@ -274,3 +273,4 @@ def extract_all_features(url):
 
     f["url"] = u
     return f
+
