@@ -267,10 +267,28 @@ def extract_all_features(url):
         "marketplace_type",
         "domain_exists"
     ]
+# ---------------------------------------------------------
+# Seller status (Marketplace only)
+# 0 = unknown
+# 1 = verified / official
+# ---------------------------------------------------------
+f["seller_status"] = 0  # default
+
+if f["marketplace_type"] != 0:  # only run seller logic on Shopee/Lazada/etc.
+    # Verified sellers
+    if "official" in url_l or "flagship" in url_l or "verified" in url_l:
+        f["seller_status"] = 1
+
+    # Normal sellers
+    elif "shop" in url_l or "seller" in url_l or "store" in url_l:
+        f["seller_status"] = 0
+
+    # Otherwise unknown (still 0)
 
     for k in expected:
         f.setdefault(k, 0)
 
     f["url"] = u
     return f
+
 
