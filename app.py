@@ -6,13 +6,12 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 import mysql.connector
 
-# Load local env (Railway loads automatically)
+# Load environment
 load_dotenv()
 
-# ML
+# ML imports
 from predictor import load_models, predict_from_features
 from url_feature_extractor import extract_all_features
-
 
 # --------------------------------------------------
 # Flask Init
@@ -20,15 +19,13 @@ from url_feature_extractor import extract_all_features
 app = Flask(__name__)
 CORS(app)
 
-# Load ML models once
+# Load ML models once on startup
 models = load_models()
-
 
 # --------------------------------------------------
 # DB Helper
 # --------------------------------------------------
 def get_db():
-    """Fast, clean MySQL connector instance."""
     return mysql.connector.connect(
         host=os.getenv("DB_HOST"),
         user=os.getenv("DB_USER"),
@@ -36,17 +33,6 @@ def get_db():
         database=os.getenv("DB_NAME"),
         autocommit=True
     )
-
-@app.route("/db_test")
-def db_test():
-    try:
-        db = get_db()
-        cursor = db.cursor()
-        cursor.execute("SELECT COUNT(*) FROM scan_results;")
-        count = cursor.fetchone()[0]
-        return {"db": "connected", "rows": count}
-    except Exception as e:
-        return {"db": "error", "error": str(e)}
 
 # --------------------------------------------------
 # Root Check
@@ -58,7 +44,6 @@ def root():
         "service": "SmellScam ML API",
         "fast_mode": os.getenv("FAST_MODE", "0")
     })
-
 
 # --------------------------------------------------
 # /predict
@@ -74,21 +59,20 @@ def predict():
         user_id = data.get("user_id")
 
         if not url:
-            return jsonify({"error": "Missing 'url'"}), 400
+            return jsonify({"error": "Missing 'url' field"}), 400
 
-        # Extract features
+        # 1) Extract features
         features = extract_all_features(url)
 
-        # Run ML prediction
+        # 2) ML prediction
         result = predict_from_features(features, models, raw_url=url)
         trust_score = result.get("trust_score", 0)
 
-        # Save DB history only for logged-in users
+        # 3) Save result if user is logged in
         if user_id:
             try:
                 db = get_db()
                 cursor = db.cursor()
-
                 cursor.execute(
                     """
                     INSERT INTO scan_results (user_id, shopping_url, trust_score, scanned_at)
@@ -96,13 +80,12 @@ def predict():
                     """,
                     (user_id, url, trust_score)
                 )
-
                 cursor.close()
                 db.close()
-
             except Exception as db_err:
                 print("[DB ERROR]", db_err)
 
+        # 4) Return everything to frontend
         return jsonify({
             "url": url,
             "features": features,
@@ -115,7 +98,7 @@ def predict():
 
 
 # --------------------------------------------------
-# /history
+# /history - User history
 # --------------------------------------------------
 @app.route("/history", methods=["GET"])
 def history():
@@ -149,7 +132,7 @@ def history():
 
 
 # --------------------------------------------------
-# /scan_results (admin)
+# /scan_results - Admin view
 # --------------------------------------------------
 @app.route("/scan_results", methods=["GET"])
 def scan_results():
@@ -167,7 +150,6 @@ def scan_results():
         )
 
         rows = cursor.fetchall()
-
         cursor.close()
         db.close()
 
@@ -179,7 +161,7 @@ def scan_results():
 
 
 # --------------------------------------------------
-# Gunicorn / Local
+# Run Application (Local)
 # --------------------------------------------------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
