@@ -1,5 +1,6 @@
 import os
 import traceback
+import json
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -9,7 +10,7 @@ import mysql.connector
 # Load environment variables
 load_dotenv()
 
-# ML imports
+# ML
 from predictor import load_models, predict_from_features
 from url_feature_extractor import extract_all_features
 
@@ -19,7 +20,7 @@ from url_feature_extractor import extract_all_features
 app = Flask(__name__)
 CORS(app)
 
-# Load ML models once (fast)
+# Load ML models once
 models = load_models()
 
 
@@ -52,7 +53,7 @@ def db_test():
 
 
 # --------------------------------------------------
-# Root
+# Root Endpoint
 # --------------------------------------------------
 @app.route("/", methods=["GET"])
 def root():
@@ -64,17 +65,27 @@ def root():
 
 
 # --------------------------------------------------
-# /predict  — MAIN ENDPOINT
+# /predict — MAIN ML ENDPOINT
 # --------------------------------------------------
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
-        # Parse JSON body
-        data = request.get_json(force=True)
-        if not data:
-            return jsonify({"error": "Invalid JSON body"}), 400
+        # ------------------------------------------------------
+        # FIXED: Exabytes / Cloudflare Safe JSON Parsing
+        # ------------------------------------------------------
+        try:
+            data = request.get_json(force=True)
+        except:
+            data = None
 
-        # Accept either "url" (your backend) or "target" (your PHP form)
+        if not data:
+            try:
+                raw = request.data.decode("utf-8")
+                data = json.loads(raw)
+            except:
+                return jsonify({"error": "Invalid JSON body"}), 400
+
+        # Accept both keys (PHP uses "target", API tools use "url")
         url = (data.get("url") or data.get("target") or "").strip()
         user_id = data.get("user_id")
 
@@ -83,15 +94,15 @@ def predict():
 
         print("📥 Incoming URL:", url)
 
-        # Extract all ML + live features
+        # Extract features
         features = extract_all_features(url)
 
-        # Perform ML prediction
+        # ML prediction
         result = predict_from_features(features, models, raw_url=url)
         trust_score = result.get("trust_score", 0)
 
         # ------------------------------------------------------
-        # SAVE SCAN ONLY IF USER LOGGED IN
+        # Save scan result ONLY for logged-in users
         # ------------------------------------------------------
         if user_id:
             try:
@@ -111,7 +122,7 @@ def predict():
             except Exception as db_err:
                 print("[DB ERROR]", db_err)
 
-        # Return backend response
+        # Successful response
         return jsonify({
             "target": url,
             "features": features,
@@ -124,7 +135,7 @@ def predict():
 
 
 # --------------------------------------------------
-# /history
+# /history — User scan history
 # --------------------------------------------------
 @app.route("/history", methods=["GET"])
 def history():
@@ -158,7 +169,7 @@ def history():
 
 
 # --------------------------------------------------
-# Admin: All Scan Results
+# /scan_results — Admin view
 # --------------------------------------------------
 @app.route("/scan_results", methods=["GET"])
 def scan_results():
