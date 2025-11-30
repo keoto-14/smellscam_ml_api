@@ -338,44 +338,67 @@ class Predictor:
                 "weights": self.weights
             }
 
-        # VT CLEAN PATH (vt_mal == 0) -> prefer VT and live signals, reduce ML influence
+        # ---------------- VT CLEAN PATH (vt_mal == 0) ----------------
+        # Implement requested ranges and special handling for Facebook/TikTok.
         if vt_mal == 0:
-            w_ml_vtclean = max(0.05, min(0.25, self.weights.get("ml") * 0.35))
-            w_vt_vtclean = max(0.6, min(0.9, self.weights.get("vt") + 0.25))
-            w_gsb = self.weights.get("gsb", 0.05)
-            leftover = max(0.0, 1.0 - (w_ml_vtclean + w_vt_vtclean + w_gsb))
+            seller_status = int(feats.get("seller_status", 0))  # 0 unknown/normal,1 verified,2 suspicious
+            marketplace_type = int(feats.get("marketplace_type", 0))  # 0 non-marketplace, 1..n known marketplaces
 
-            vt_pref_combined = (
-                w_ml_vtclean * ml_component +
-                w_vt_vtclean * vt_component +
-                w_gsb * gsb_component +
-                leftover * live_component
-            )
-            vt_pref_combined = min(max(vt_pref_combined, 0.0), 1.0)
-            trust_score = round(vt_pref_combined * 100.0, 2)
+            def choose_stable(low:int, high:int) -> int:
+                # Ensure sensible bounds
+                low = max(0, min(100, int(low)))
+                high = max(low, min(100, int(high)))
+                return int(self.stable_random(stable_key, low, high))
 
-            seller_status = int(feats.get("seller_status", 0))
-            marketplace_type = int(feats.get("marketplace_type", 0))
-
-            if marketplace_type != 0:
-                if seller_status == 1:
-                    trust_score = max(trust_score, 80)
-                elif seller_status == 0:
-                    trust_score = max(0.0, trust_score - 10.0)
-                elif seller_status == 2:
-                    trust_score = max(0.0, trust_score - 20.0)
-
-            if domain_exists == 0:
-                trust_score = min(trust_score, 49)
-
-            # produce a stable, slightly varied integer in a small range so different URLs produce different but stable scores
-            if trust_score >= 50:
-                ts_int = int(self.stable_random(stable_key, max(50, int(trust_score)), min(100, max(50, int(trust_score) + 5))))
+            # Default ranges (general marketplaces)
+            if marketplace_type == 0:
+                # Non-marketplace default: 80-90; if domain exists and vt clean, boost upper to 87
+                low, high = 80, 90
+                if domain_exists == 1:
+                    high = min(high, 87)  # booster to cap 87 as requested
             else:
-                ts_int = int(self.stable_random(stable_key, 50, 69))
+                # Per-marketplace default table:
+                # Marketplace codes: 1=Shopee,2=Lazada,3=Temu,4=TikTok,5=Facebook
+                if marketplace_type in (1, 2, 3):  # Shopee/Lazada/Temu
+                    if seller_status == 1:   # Verified
+                        low, high = 95, 100
+                    elif seller_status == 0: # Normal / Unknown
+                        low, high = 85, 95
+                    else:                    # Suspicious seller
+                        low, high = 75, 85
+                elif marketplace_type == 4:  # TikTok Shop — be a bit conservative
+                    if seller_status == 1:
+                        low, high = 90, 95
+                    elif seller_status == 0:
+                        low, high = 82, 88
+                    else:
+                        low, high = 75, 83
+                elif marketplace_type == 5:  # Facebook Shop — more conservative (many untrusted sellers)
+                    if seller_status == 1:
+                        low, high = 85, 92
+                    elif seller_status == 0:
+                        low, high = 75, 85
+                    else:
+                        low, high = 70, 80
+                else:
+                    # Unknown marketplace fallback
+                    if seller_status == 1:
+                        low, high = 92, 98
+                    elif seller_status == 0:
+                        low, high = 84, 92
+                    else:
+                        low, high = 75, 85
+
+            # Finally produce a stable integer trust score within chosen range
+            ts_int = choose_stable(low, high)
+
+            # Enforce some caps/adjustments: domain_exists still matters
+            if domain_exists == 0:
+                ts_int = min(ts_int, 49)
 
             label = "LEGITIMATE" if ts_int >= 75 else "SUSPICIOUS" if ts_int >= 50 else "PHISHING"
-            logger.info("VT-clean prefer (%s) -> trust=%s label=%s seller=%s mp=%s", domain, ts_int, label, seller_status, marketplace_type)
+            logger.info("VT-clean mapping (%s) mp=%s seller=%s -> trust=%d label=%s range=(%d,%d)",
+                        domain, marketplace_type, seller_status, ts_int, label, low, high)
 
             return {
                 "trust_score": ts_int,
@@ -388,10 +411,10 @@ class Predictor:
                 "marketplace_type": int(feats.get("marketplace_type", 0)),
                 "domain_exists": domain_exists,
                 "live_component": round(live_component, 4),
-                "weights": {"ml": w_ml_vtclean, "vt": w_vt_vtclean, "gsb": w_gsb, "leftover": leftover}
+                "weights": {"ml": self.weights.get("ml"), "vt": self.weights.get("vt"), "gsb": self.weights.get("gsb")}
             }
 
-        # fallback weighted combine
+        # ---------------- If none of the VT/GSB overrides fired, fallback to weighted combine ----------------
         w_ml = self.weights.get("ml", 0.60)
         w_vt = self.weights.get("vt", 0.35)
         w_gsb = self.weights.get("gsb", 0.05)
