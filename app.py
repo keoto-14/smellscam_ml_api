@@ -6,10 +6,10 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 import mysql.connector
 
-# Load local env (Railway loads automatically)
+# Load environment variables
 load_dotenv()
 
-# ML
+# ML imports
 from predictor import load_models, predict_from_features
 from url_feature_extractor import extract_all_features
 
@@ -19,14 +19,15 @@ from url_feature_extractor import extract_all_features
 app = Flask(__name__)
 CORS(app)
 
-# Load ML models once
+# Load ML models once (fast)
 models = load_models()
+
 
 # --------------------------------------------------
 # DB Helper
 # --------------------------------------------------
 def get_db():
-    """Fast, clean MySQL connector instance."""
+    """Return MySQL connection."""
     return mysql.connector.connect(
         host=os.getenv("DB_HOST"),
         user=os.getenv("DB_USER"),
@@ -42,14 +43,16 @@ def db_test():
         db = get_db()
         cursor = db.cursor()
         cursor.execute("SELECT COUNT(*) FROM scan_results;")
-        count = cursor.fetchone()[0]
-        return {"db": "connected", "rows": count}
+        rows = cursor.fetchone()[0]
+        cursor.close()
+        db.close()
+        return {"db": "connected", "rows": rows}
     except Exception as e:
         return {"db": "error", "error": str(e)}
 
 
 # --------------------------------------------------
-# Root Check
+# Root
 # --------------------------------------------------
 @app.route("/", methods=["GET"])
 def root():
@@ -61,51 +64,54 @@ def root():
 
 
 # --------------------------------------------------
-# /predict  (FULLY FIXED)
+# /predict  — MAIN ENDPOINT
 # --------------------------------------------------
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
-        # Strict JSON parsing
+        # Parse JSON body
         data = request.get_json(force=True)
         if not data:
             return jsonify({"error": "Invalid JSON body"}), 400
 
-        # Accept BOTH "target" (from PHP) and "url" (from ThunderClient)
-        url = (data.get("target") or data.get("url") or "").strip()
+        # Accept either "url" (your backend) or "target" (your PHP form)
+        url = (data.get("url") or data.get("target") or "").strip()
         user_id = data.get("user_id")
 
         if not url:
-            return jsonify({"error": "Missing URL (expected 'target' or 'url')"}), 400
+            return jsonify({"error": "Missing URL"}), 400
 
         print("📥 Incoming URL:", url)
 
-        # Extract features
+        # Extract all ML + live features
         features = extract_all_features(url)
 
-        # ML prediction
+        # Perform ML prediction
         result = predict_from_features(features, models, raw_url=url)
         trust_score = result.get("trust_score", 0)
 
-        # Save DB history only for logged-in users
+        # ------------------------------------------------------
+        # SAVE SCAN ONLY IF USER LOGGED IN
+        # ------------------------------------------------------
         if user_id:
             try:
                 db = get_db()
                 cursor = db.cursor()
+
                 cursor.execute(
                     """
-                    INSERT INTO scan_results 
-                        (user_id, shopping_url, trust_score, scanned_at)
+                    INSERT INTO scan_results (user_id, shopping_url, trust_score, scanned_at)
                     VALUES (%s, %s, %s, NOW())
                     """,
-                    (user_id, url, trust_score)
+                    (int(user_id), url, trust_score)
                 )
+
                 cursor.close()
                 db.close()
             except Exception as db_err:
                 print("[DB ERROR]", db_err)
 
-        # Return JSON result
+        # Return backend response
         return jsonify({
             "target": url,
             "features": features,
@@ -152,7 +158,7 @@ def history():
 
 
 # --------------------------------------------------
-# /scan_results (admin)
+# Admin: All Scan Results
 # --------------------------------------------------
 @app.route("/scan_results", methods=["GET"])
 def scan_results():
@@ -182,7 +188,7 @@ def scan_results():
 
 
 # --------------------------------------------------
-# Gunicorn / Local
+# Server Start
 # --------------------------------------------------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
