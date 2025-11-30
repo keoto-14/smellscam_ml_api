@@ -10,7 +10,7 @@ import mysql.connector
 # Load environment variables
 load_dotenv()
 
-# ML
+# ML Imports
 from predictor import load_models, predict_from_features
 from url_feature_extractor import extract_all_features
 
@@ -20,7 +20,6 @@ from url_feature_extractor import extract_all_features
 app = Flask(__name__)
 CORS(app)
 
-# Load ML models once
 models = load_models()
 
 
@@ -43,50 +42,42 @@ def db_test():
         db = get_db()
         cursor = db.cursor()
         cursor.execute("SELECT COUNT(*) FROM scan_results;")
-        rows = cursor.fetchone()[0]
+        count = cursor.fetchone()[0]
         cursor.close()
         db.close()
-        return {"db": "connected", "rows": rows}
+        return {"db": "connected", "rows": count}
     except Exception as e:
         return {"db": "error", "error": str(e)}
 
 
 # --------------------------------------------------
-# Root Endpoint
+# Root
 # --------------------------------------------------
 @app.route("/", methods=["GET"])
 def root():
-    return jsonify({
-        "status": "running",
-        "service": "SmellScam ML API"
-    })
+    return jsonify({"status": "running", "service": "SmellScam ML API"})
 
 
 # --------------------------------------------------
-# /predict — MAIN API ENDPOINT
+# PREDICT API
 # --------------------------------------------------
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
-        # ------------------------------
+        # ----------------------------
         # JSON FIX (Exabytes safe)
-        # ------------------------------
-        try:
-            data = request.get_json(force=True)
-        except:
-            data = None
+        # ----------------------------
+        data = request.get_json(silent=True)
 
         if not data:
+            raw = request.data.decode("utf-8").strip()
             try:
-                raw = request.data.decode("utf-8")
                 data = json.loads(raw)
             except:
-                return jsonify({"error": "Invalid JSON"}), 400
+                return jsonify({"error": "Invalid or empty JSON"}), 400
 
-        # ------------------------------
-        # ACCEPT ONLY "url" (your backend)
-        # ------------------------------
-        url = (data.get("url") or "").strip()
+        # Accept "url" or "target"
+        url = (data.get("url") or data.get("target") or "").strip()
         user_id = data.get("user_id")
 
         if not url:
@@ -94,16 +85,14 @@ def predict():
 
         print("📥 Incoming URL:", url)
 
-        # Extract features
+        # Extract ML features
         features = extract_all_features(url)
 
-        # ML Prediction
+        # ML prediction
         result = predict_from_features(features, models, raw_url=url)
         trust_score = result.get("trust_score", 0)
 
-        # ------------------------------
-        # Save DB only for logged users
-        # ------------------------------
+        # Save into DB (only if logged in)
         if user_id:
             try:
                 db = get_db()
@@ -132,12 +121,13 @@ def predict():
 
 
 # --------------------------------------------------
-# /history — User scan history
+# User History
 # --------------------------------------------------
 @app.route("/history", methods=["GET"])
 def history():
     try:
         user_id = request.args.get("user_id")
+
         if not user_id:
             return jsonify({"error": "Missing user_id"}), 400
 
@@ -166,7 +156,7 @@ def history():
 
 
 # --------------------------------------------------
-# Admin — get all scan results
+# Admin — All scans
 # --------------------------------------------------
 @app.route("/scan_results", methods=["GET"])
 def scan_results():
@@ -175,12 +165,7 @@ def scan_results():
         cursor = db.cursor(dictionary=True)
 
         cursor.execute(
-            """
-            SELECT id, user_id, shopping_url, trust_score, scanned_at
-            FROM scan_results
-            ORDER BY scanned_at DESC
-            LIMIT 200
-            """
+            "SELECT * FROM scan_results ORDER BY scanned_at DESC LIMIT 200"
         )
 
         rows = cursor.fetchall()
@@ -188,14 +173,13 @@ def scan_results():
         db.close()
 
         return jsonify({"count": len(rows), "results": rows})
-
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
 # --------------------------------------------------
-# Server Start
+# Start
 # --------------------------------------------------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
