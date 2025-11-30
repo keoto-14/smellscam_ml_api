@@ -1,4 +1,3 @@
-# url_feature_extractor.py
 import os
 import re
 import urllib.parse
@@ -54,12 +53,12 @@ def safe_whois(host):
     try:
         w = pywhois.whois(host)
         cd = w.creation_date
-        if isinstance(cd, list): cd = cd[0]
+        if isinstance(cd, list):
+            cd = cd[0]
         if isinstance(cd, str):
             try:
                 cd = datetime.fromisoformat(cd)
             except:
-                # ignore parse error
                 cd = None
         if cd:
             return max(0, (datetime.utcnow() - cd).days)
@@ -102,29 +101,97 @@ def check_dns_exists(host):
         return 0
 
 
-# Marketplace detector (safe, simple)
-def detect_marketplace(host):
-    if "shopee.com" in host: return 1
-    if "lazada.com" in host: return 2
-    if "temu.com" in host: return 3
-    if "tiktok.com" in host: return 4
-    if "facebook.com" in host: return 5
-    return 0
+# ---------------------------------------------------
+# UPDATED MARKETPLACE DETECTOR
+# ---------------------------------------------------
+def detect_marketplace(host: str) -> int:
+    host = host.lower()
+
+    if "shopee.com" in host:
+        return 1  # Shopee
+
+    if "lazada" in host:
+        return 2  # Lazada
+
+    if "tiktok.com" in host or "douyin.com" in host:
+        return 3  # TikTok Shop
+
+    if ("facebook.com" in host or "fb.com" in host or
+        "m.facebook.com" in host):
+        return 4  # Facebook Shops / Marketplace
+
+    return 0  # Normal website
 
 
-# Seller detector (safe heuristic) - only applied when marketplace_type > 0
+# ---------------------------------------------------
+# UPDATED SELLER STATUS DETECTOR (Shopee, Lazada,
+# TikTok, Facebook)
+# ---------------------------------------------------
 def detect_seller_status(url_l: str, marketplace_type: int) -> int:
-    # 0 = Unknown / Normal, 1 = Verified, 2 = Suspicious
-    if marketplace_type == 0:
+    """
+    0 = Unknown / Normal seller
+    1 = Verified seller
+    2 = Suspicious seller
+    """
+
+    url_l = url_l.lower()
+
+    # --------------------------
+    # SHOPEE
+    # --------------------------
+    if marketplace_type == 1:
+        if "/mall" in url_l:
+            return 1
+
+        if url_l.split("/")[-1].endswith(
+            (".my", ".os", ".sg", ".ph", ".vn", ".th")
+        ):
+            return 1
+
+        if "official" in url_l or "flagship" in url_l:
+            return 1
+
+        if "/shop/" in url_l or "shop=" in url_l:
+            return 1
+
         return 0
-    if "official" in url_l or "flagship" in url_l or "verified" in url_l:
-        return 1
-    if "seller" in url_l and ("id=" not in url_l and "shop" not in url_l):
-        return 2
-    # explicit shop paths are considered normal/unknown
-    if "shop" in url_l or "store" in url_l or "sp_id" in url_l:
+
+    # --------------------------
+    # LAZADA
+    # --------------------------
+    if marketplace_type == 2:
+        if "lazmall" in url_l:
+            return 1
+        if "official" in url_l or "flagship" in url_l:
+            return 1
+        if "just-launched" in url_l or "newstore" in url_l:
+            return 2
         return 0
-    return 0
+
+    # --------------------------
+    # TIKTOK SHOP
+    # --------------------------
+    if marketplace_type == 3:
+        if any(k in url_l for k in ["official", "flagship", "mall"]):
+            return 1
+        if any(k in url_l for k in ["unknown", "random"]):
+            return 2
+        return 0
+
+    # --------------------------
+    # FACEBOOK MARKETPLACE
+    # --------------------------
+    if marketplace_type == 4:
+        if "/marketplace/" in url_l:
+            return 0
+        if "/pages/" in url_l or "/shop/" in url_l:
+            return 1
+        if "/groups/" in url_l:
+            return 2
+        return 0
+
+    return 0  # Normal website
+
 
 
 def extract_all_features(url):
@@ -135,14 +202,16 @@ def extract_all_features(url):
 
     f = {}
 
-    # BASIC
+    # BASIC FEATURES
     f["length_url"] = len(u)
     f["length_hostname"] = len(host)
     f["nb_dots"] = host.count(".")
     f["nb_hyphens"] = host.count("-")
     f["nb_numeric_chars"] = sum(c.isdigit() for c in u)
 
-    scamwords = ["login","verify","secure","bank","account","update","confirm","urgent","pay","gift","free","click","signin","auth"]
+    scamwords = ["login", "verify", "secure", "bank", "account",
+                 "update", "confirm", "urgent", "pay", "gift",
+                 "free", "click", "signin", "auth"]
     f["contains_scam_keyword"] = int(any(w in url_l for w in scamwords))
 
     for sym, name in [
@@ -153,7 +222,8 @@ def extract_all_features(url):
     ]:
         f[name] = u.count(sym)
 
-    f["shortening_service"] = int(bool(re.search(r"(bit\.ly|tinyurl|t\.co|goo\.gl)", url_l)))
+    f["shortening_service"] = int(bool(re.search(
+        r"(bit\.ly|tinyurl|t\.co|goo\.gl)", url_l)))
     f["nb_www"] = int(host.startswith("www"))
     f["ends_with_com"] = int(host.endswith(".com"))
     f["nb_subdomains"] = max(0, host.count(".") - 1)
@@ -170,13 +240,18 @@ def extract_all_features(url):
     f["brand_in_path"] = int(bool(common))
 
     f["char_repeat3"] = int(bool(re.search(r"(.)\1\1", u)))
-    f["ratio_digits_url"] = (sum(c.isdigit() for c in u) / max(1, len(u))) * 100
-    f["ratio_digits_host"] = (sum(c.isdigit() for c in host) / max(1, len(host))) * 100
+    f["ratio_digits_url"] = (sum(c.isdigit() for c in u)
+                             / max(1, len(u))) * 100
+    f["ratio_digits_host"] = (sum(c.isdigit() for c in host)
+                              / max(1, len(host))) * 100
 
     # NEW FEATURES
     tld = host.split(".")[-1]
-    f["suspicious_tld"] = int(tld in {"top","xyz","win","tk","ml","gq","ru","vip","live"})
-    brands = ["paypal","google","apple","amazon","microsoft","bank","meta"]
+    f["suspicious_tld"] = int(tld in {
+        "top", "xyz", "win", "tk", "ml", "gq", "ru", "vip", "live"
+    })
+
+    brands = ["paypal", "google", "apple", "amazon", "microsoft", "bank", "meta"]
     f["brand_mismatch"] = int(any(b in url_l and b not in host for b in brands))
     f["double_hyphen"] = int("--" in host)
     f["subdomain_count"] = host.count(".")
@@ -184,14 +259,21 @@ def extract_all_features(url):
 
     def entropy(s):
         import math
-        prob = [s.count(c)/len(c) if False else s.count(c)/len(s) for c in dict.fromkeys(s)]
+        prob = [s.count(c) / len(s) for c in dict.fromkeys(s)]
         return -sum(p * math.log(p, 2) for p in prob) if s else 0
+
     f["entropy_url"] = entropy(u) if u else 0
 
-    f["free_hosting"] = int(any(h in host for h in ["wixsite.com","weebly.com","000webhost","github.io","webflow.io","blogspot.com"]))
-    f["keyword_suspect"] = int(any(k in url_l for k in ["promo","discount","freegift","bonus","offer","deal"]))
+    f["free_hosting"] = int(any(h in host for h in [
+        "wixsite.com", "weebly.com", "000webhost",
+        "github.io", "webflow.io", "blogspot.com"
+    ]))
 
-    # LIVE / HTML parsing
+    f["keyword_suspect"] = int(any(k in url_l for k in [
+        "promo", "discount", "freegift", "bonus", "offer", "deal"
+    ]))
+
+    # LIVE FEATURES
     if FAST_MODE or TRAIN_MODE:
         f.update({
             "ssl_valid": 1,
@@ -214,18 +296,23 @@ def extract_all_features(url):
         f["quad9_blocked"] = quad9_block(host)
 
         html = safe_request(u)
-        soup = BeautifulSoup(html, "html.parser") if (html and BeautifulSoup) else None
+        soup = BeautifulSoup(html, "html.parser") if (
+            html and BeautifulSoup) else None
 
         if soup:
             f["iframe_present"] = int(bool(soup.find_all("iframe")))
-            f["login_form"] = int(bool(soup.find_all("input", {"type": "password"})))
+            f["login_form"] = int(bool(
+                soup.find_all("input", {"type": "password"})))
             txt = soup.get_text(" ", strip=True).lower()
             f["popup_window"] = int("popup" in txt or "modal" in txt)
-            f["right_click_disabled"] = int("oncontextmenu" in (html.lower() if html else ""))
+            f["right_click_disabled"] = int(
+                "oncontextmenu" in (html.lower() if html else ""))
             title = soup.title.string.strip() if soup.title else ""
             f["empty_title"] = int(title == "")
             wc = len(re.findall(r"\w+", txt))
-            f["web_traffic"] = 1000 if wc > 2000 else 500 if wc > 500 else 100 if wc > 100 else 10
+            f["web_traffic"] = (1000 if wc > 2000 else
+                                500 if wc > 500 else
+                                100 if wc > 100 else 10)
         else:
             f["iframe_present"] = 0
             f["login_form"] = 0
@@ -234,31 +321,34 @@ def extract_all_features(url):
             f["empty_title"] = 0
             f["web_traffic"] = 100
 
-        # Keep VT fields neutral here — predictor will call VT API
         f["vt_total_vendors"] = 0
         f["vt_malicious_count"] = 0
         f["vt_detection_ratio"] = 0.0
 
-    # Marketplace + seller + domain existence
+    # -----------------------------------------------------
+    # UPDATED: Marketplace + Seller Status
+    # -----------------------------------------------------
     f["marketplace_type"] = detect_marketplace(host)
-    f["seller_status"] = detect_seller_status(url_l, f["marketplace_type"]) if f["marketplace_type"] != 0 else 0
+    f["seller_status"] = detect_seller_status(url_l, f["marketplace_type"])
     f["domain_exists"] = check_dns_exists(host)
 
-    # FIXED ORDER — keep same feature order as your model expects
+    # FIXED MODEL FEATURE ORDER
     expected = [
-        "length_url","length_hostname","nb_dots","nb_hyphens","nb_numeric_chars",
-        "contains_scam_keyword","nb_at","nb_qm","nb_and","nb_underscore",
-        "nb_tilde","nb_percent","nb_slash","nb_hash","shortening_service",
-        "nb_www","ends_with_com","nb_subdomains","abnormal_subdomain",
-        "prefix_suffix","path_extension_php","domain_in_brand","brand_in_path",
-        "char_repeat3","ratio_digits_url","ratio_digits_host",
-        "suspicious_tld","brand_mismatch","double_hyphen","subdomain_count",
-        "suspicious_subdomain","entropy_url","free_hosting","keyword_suspect",
-        "ssl_valid","domain_age_days","quad9_blocked","vt_total_vendors",
-        "vt_malicious_count","vt_detection_ratio","external_favicon",
-        "login_form","iframe_present","popup_window",
-        "right_click_disabled","empty_title","web_traffic",
-        "marketplace_type","seller_status","domain_exists"
+        "length_url", "length_hostname", "nb_dots", "nb_hyphens",
+        "nb_numeric_chars", "contains_scam_keyword", "nb_at", "nb_qm",
+        "nb_and", "nb_underscore", "nb_tilde", "nb_percent", "nb_slash",
+        "nb_hash", "shortening_service", "nb_www", "ends_with_com",
+        "nb_subdomains", "abnormal_subdomain", "prefix_suffix",
+        "path_extension_php", "domain_in_brand", "brand_in_path",
+        "char_repeat3", "ratio_digits_url", "ratio_digits_host",
+        "suspicious_tld", "brand_mismatch", "double_hyphen",
+        "subdomain_count", "suspicious_subdomain", "entropy_url",
+        "free_hosting", "keyword_suspect", "ssl_valid",
+        "domain_age_days", "quad9_blocked", "vt_total_vendors",
+        "vt_malicious_count", "vt_detection_ratio", "external_favicon",
+        "login_form", "iframe_present", "popup_window",
+        "right_click_disabled", "empty_title", "web_traffic",
+        "marketplace_type", "seller_status", "domain_exists"
     ]
 
     for k in expected:
