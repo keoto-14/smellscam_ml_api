@@ -104,21 +104,28 @@ def check_dns_exists(host):
 # ---------------------------------------------------
 # UPDATED MARKETPLACE DETECTOR
 # ---------------------------------------------------
-def detect_marketplace(host: str) -> int:
-    host = host.lower()
-
-    if "shopee.com" in host:
+def detect_marketplace(host):
+    h = host.lower()
+    
+    # exact matched endings
+    if h.endswith("shopee.com") or h.endswith("shopee.com.my"):
         return 1  # Shopee
-
-    if "lazada" in host:
+    
+    if h.endswith("lazada.com") or h.endswith("lazada.com.my"):
         return 2  # Lazada
-
-    if "tiktok.com" in host or "douyin.com" in host:
-        return 3  # TikTok Shop
-
-    if ("facebook.com" in host or "fb.com" in host or
-        "m.facebook.com" in host):
-        return 4  # Facebook Shops / Marketplace
+    
+    if h.endswith("temu.com"):
+        return 3  # Temu
+    
+    # TikTok domains
+    if h.endswith("tiktok.com") or h.endswith("tiktokv.com") or h.endswith("vt.tiktok.com"):
+        return 4  # TikTok Shop
+    
+    # Facebook/Meta
+    if h.endswith("facebook.com") or h.endswith("fb.com"):
+        return 5
+    
+    return 0
 
     return 0  # Normal website
 
@@ -356,3 +363,4 @@ def extract_all_features(url):
 
     f["url"] = u
     return f
+
