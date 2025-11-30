@@ -1,18 +1,18 @@
 import os
-import json
 import traceback
+import json
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
 import mysql.connector
 
-# ML imports
-from predictor import load_models, predict_from_features
-from url_feature_extractor import extract_all_features
-
 # Load environment variables
 load_dotenv()
+
+# ML
+from predictor import load_models, predict_from_features
+from url_feature_extractor import extract_all_features
 
 # --------------------------------------------------
 # Flask Init
@@ -20,7 +20,7 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app)
 
-# Load ML models once at startup
+# Load ML models once
 models = load_models()
 
 
@@ -58,47 +58,52 @@ def db_test():
 def root():
     return jsonify({
         "status": "running",
-        "service": "SmellScam ML API",
-        "fast_mode": os.getenv("FAST_MODE", "0")
+        "service": "SmellScam ML API"
     })
 
 
 # --------------------------------------------------
-# /predict (Main Endpoint)
+# /predict — MAIN API ENDPOINT
 # --------------------------------------------------
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
-        # Safe JSON parsing (Exabytes, Cloudflare)
+        # ------------------------------
+        # JSON FIX (Exabytes safe)
+        # ------------------------------
         try:
             data = request.get_json(force=True)
         except:
-            try:
-                raw_data = request.data.decode("utf-8")
-                data = json.loads(raw_data)
-            except:
-                return jsonify({"error": "Invalid JSON body"}), 400
+            data = None
 
         if not data:
-            return jsonify({"error": "Missing JSON"}), 400
+            try:
+                raw = request.data.decode("utf-8")
+                data = json.loads(raw)
+            except:
+                return jsonify({"error": "Invalid JSON"}), 400
 
-        # Accept both "target" and "url"
-        url = (data.get("url") or data.get("target") or "").strip()
+        # ------------------------------
+        # ACCEPT ONLY "url" (your backend)
+        # ------------------------------
+        url = (data.get("url") or "").strip()
         user_id = data.get("user_id")
 
         if not url:
             return jsonify({"error": "Missing URL"}), 400
 
-        print(f"📥 Received URL: {url}")
+        print("📥 Incoming URL:", url)
 
         # Extract features
         features = extract_all_features(url)
 
-        # Predict ML output
+        # ML Prediction
         result = predict_from_features(features, models, raw_url=url)
         trust_score = result.get("trust_score", 0)
 
-        # Save result (only for logged-in users)
+        # ------------------------------
+        # Save DB only for logged users
+        # ------------------------------
         if user_id:
             try:
                 db = get_db()
@@ -115,9 +120,8 @@ def predict():
             except Exception as db_err:
                 print("[DB ERROR]", db_err)
 
-        # Success response
         return jsonify({
-            "target": url,
+            "url": url,
             "features": features,
             "result": result
         })
@@ -128,7 +132,7 @@ def predict():
 
 
 # --------------------------------------------------
-# /history (User Scan History)
+# /history — User scan history
 # --------------------------------------------------
 @app.route("/history", methods=["GET"])
 def history():
@@ -162,7 +166,7 @@ def history():
 
 
 # --------------------------------------------------
-# /scan_results (Admin)
+# Admin — get all scan results
 # --------------------------------------------------
 @app.route("/scan_results", methods=["GET"])
 def scan_results():
