@@ -35,6 +35,7 @@ def get_db():
         autocommit=True
     )
 
+
 @app.route("/db_test")
 def db_test():
     try:
@@ -42,11 +43,10 @@ def db_test():
         cursor = db.cursor()
         cursor.execute("SELECT COUNT(*) FROM scan_results;")
         count = cursor.fetchone()[0]
-        cursor.close()
-        db.close()
         return {"db": "connected", "rows": count}
     except Exception as e:
         return {"db": "error", "error": str(e)}
+
 
 # --------------------------------------------------
 # Root Check
@@ -59,30 +59,31 @@ def root():
         "fast_mode": os.getenv("FAST_MODE", "0")
     })
 
+
 # --------------------------------------------------
-# /predict
+# /predict  (FULLY FIXED)
 # --------------------------------------------------
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
-        # ensure JSON content-type -> give friendly message if not
-        if not request.is_json:
-            return jsonify({"error": "Invalid Content-Type. Use application/json"}), 415
-
+        # Strict JSON parsing
         data = request.get_json(force=True)
         if not data:
             return jsonify({"error": "Invalid JSON body"}), 400
 
-        url = (data.get("url") or "").strip()
+        # Accept BOTH "target" (from PHP) and "url" (from ThunderClient)
+        url = (data.get("target") or data.get("url") or "").strip()
         user_id = data.get("user_id")
 
         if not url:
-            return jsonify({"error": "Missing 'url'"}), 400
+            return jsonify({"error": "Missing URL (expected 'target' or 'url')"}), 400
+
+        print("📥 Incoming URL:", url)
 
         # Extract features
         features = extract_all_features(url)
 
-        # Run ML prediction
+        # ML prediction
         result = predict_from_features(features, models, raw_url=url)
         trust_score = result.get("trust_score", 0)
 
@@ -93,7 +94,8 @@ def predict():
                 cursor = db.cursor()
                 cursor.execute(
                     """
-                    INSERT INTO scan_results (user_id, shopping_url, trust_score, scanned_at)
+                    INSERT INTO scan_results 
+                        (user_id, shopping_url, trust_score, scanned_at)
                     VALUES (%s, %s, %s, NOW())
                     """,
                     (user_id, url, trust_score)
@@ -101,11 +103,11 @@ def predict():
                 cursor.close()
                 db.close()
             except Exception as db_err:
-                # do not fail the request on DB write failure
                 print("[DB ERROR]", db_err)
 
+        # Return JSON result
         return jsonify({
-            "url": url,
+            "target": url,
             "features": features,
             "result": result
         })
@@ -113,6 +115,7 @@ def predict():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
 
 # --------------------------------------------------
 # /history
@@ -146,6 +149,7 @@ def history():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
 
 # --------------------------------------------------
 # /scan_results (admin)
