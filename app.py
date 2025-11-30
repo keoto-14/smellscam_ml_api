@@ -6,10 +6,10 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 import mysql.connector
 
-# Load .env (Railway loads automatically)
+# Load local env (Railway loads automatically)
 load_dotenv()
 
-# ML imports
+# ML
 from predictor import load_models, predict_from_features
 from url_feature_extractor import extract_all_features
 
@@ -19,14 +19,14 @@ from url_feature_extractor import extract_all_features
 app = Flask(__name__)
 CORS(app)
 
-# Load ML models once at startup
+# Load ML models once
 models = load_models()
 
 # --------------------------------------------------
-# MySQL Helper
+# DB Helper
 # --------------------------------------------------
 def get_db():
-    """Simple clean MySQL connector."""
+    """Fast, clean MySQL connector instance."""
     return mysql.connector.connect(
         host=os.getenv("DB_HOST"),
         user=os.getenv("DB_USER"),
@@ -35,30 +35,43 @@ def get_db():
         autocommit=True
     )
 
+@app.route("/db_test")
+def db_test():
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        cursor.execute("SELECT COUNT(*) FROM scan_results;")
+        count = cursor.fetchone()[0]
+        cursor.close()
+        db.close()
+        return {"db": "connected", "rows": count}
+    except Exception as e:
+        return {"db": "error", "error": str(e)}
 
 # --------------------------------------------------
-# Root
+# Root Check
 # --------------------------------------------------
 @app.route("/", methods=["GET"])
 def root():
     return jsonify({
         "status": "running",
         "service": "SmellScam ML API",
-        "FAST_MODE": os.getenv("FAST_MODE", "0")
+        "fast_mode": os.getenv("FAST_MODE", "0")
     })
 
-
 # --------------------------------------------------
-# /predict  (MAIN API)
+# /predict
 # --------------------------------------------------
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
-        # Accept JSON ONLY
-        data = request.get_json(force=True, silent=False)
+        # ensure JSON content-type -> give friendly message if not
+        if not request.is_json:
+            return jsonify({"error": "Invalid Content-Type. Use application/json"}), 415
 
+        data = request.get_json(force=True)
         if not data:
-            return jsonify({"error": "Invalid JSON"}), 400
+            return jsonify({"error": "Invalid JSON body"}), 400
 
         url = (data.get("url") or "").strip()
         user_id = data.get("user_id")
@@ -66,14 +79,14 @@ def predict():
         if not url:
             return jsonify({"error": "Missing 'url'"}), 400
 
-        # Feature Extraction
+        # Extract features
         features = extract_all_features(url)
 
-        # ML Prediction
+        # Run ML prediction
         result = predict_from_features(features, models, raw_url=url)
-        trust_score = float(result.get("trust_score", 0))
+        trust_score = result.get("trust_score", 0)
 
-        # OPTIONAL — Save history if logged in
+        # Save DB history only for logged-in users
         if user_id:
             try:
                 db = get_db()
@@ -88,6 +101,7 @@ def predict():
                 cursor.close()
                 db.close()
             except Exception as db_err:
+                # do not fail the request on DB write failure
                 print("[DB ERROR]", db_err)
 
         return jsonify({
@@ -100,29 +114,29 @@ def predict():
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
-
 # --------------------------------------------------
-# /history (User Past Scans)
+# /history
 # --------------------------------------------------
 @app.route("/history", methods=["GET"])
 def history():
     try:
         user_id = request.args.get("user_id")
-
         if not user_id:
             return jsonify({"error": "Missing user_id"}), 400
 
         db = get_db()
         cursor = db.cursor(dictionary=True)
+
         cursor.execute(
             """
-            SELECT id, user_id, shopping_url, trust_score, scanned_at
+            SELECT id, shopping_url, trust_score, scanned_at
             FROM scan_results
             WHERE user_id = %s
             ORDER BY scanned_at DESC
             """,
             (user_id,)
         )
+
         rows = cursor.fetchall()
         cursor.close()
         db.close()
@@ -133,15 +147,15 @@ def history():
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
-
 # --------------------------------------------------
-# Admin: /scan_results
+# /scan_results (admin)
 # --------------------------------------------------
 @app.route("/scan_results", methods=["GET"])
 def scan_results():
     try:
         db = get_db()
         cursor = db.cursor(dictionary=True)
+
         cursor.execute(
             """
             SELECT id, user_id, shopping_url, trust_score, scanned_at
@@ -150,7 +164,9 @@ def scan_results():
             LIMIT 200
             """
         )
+
         rows = cursor.fetchall()
+
         cursor.close()
         db.close()
 
@@ -162,7 +178,7 @@ def scan_results():
 
 
 # --------------------------------------------------
-# Startup
+# Gunicorn / Local
 # --------------------------------------------------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
