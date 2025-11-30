@@ -6,27 +6,26 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 import mysql.connector
 
-# Load .env (Railway loads automatically)
+# Load environment variables (.env)
 load_dotenv()
 
-# ML imports
+# ML modules
 from predictor import load_models, predict_from_features
 from url_feature_extractor import extract_all_features
 
 # --------------------------------------------------
-# Flask Init
+# Flask App Init (Same Style as Your Old Version)
 # --------------------------------------------------
 app = Flask(__name__)
 CORS(app)
 
-# Load ML models once at startup
+# Load ML models once
 models = load_models()
 
 # --------------------------------------------------
-# MySQL Helper
+# Database Helper (same style)
 # --------------------------------------------------
 def get_db():
-    """Simple clean MySQL connector."""
     return mysql.connector.connect(
         host=os.getenv("DB_HOST"),
         user=os.getenv("DB_USER"),
@@ -37,28 +36,28 @@ def get_db():
 
 
 # --------------------------------------------------
-# Root
+# Root Route (same as original)
 # --------------------------------------------------
 @app.route("/", methods=["GET"])
 def root():
     return jsonify({
         "status": "running",
         "service": "SmellScam ML API",
-        "FAST_MODE": os.getenv("FAST_MODE", "0")
+        "fast_mode": os.getenv("FAST_MODE", "0")
     })
 
 
 # --------------------------------------------------
-# /predict  (MAIN API)
+# /predict (OLD STYLE + FIXED)
 # --------------------------------------------------
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
-        # Accept JSON ONLY
+        # Must force JSON only → prevents 415 issues
         data = request.get_json(force=True, silent=False)
 
         if not data:
-            return jsonify({"error": "Invalid JSON"}), 400
+            return jsonify({"error": "Invalid JSON body"}), 400
 
         url = (data.get("url") or "").strip()
         user_id = data.get("user_id")
@@ -66,25 +65,22 @@ def predict():
         if not url:
             return jsonify({"error": "Missing 'url'"}), 400
 
-        # Feature Extraction
+        # Feature extraction
         features = extract_all_features(url)
 
-        # ML Prediction
+        # ML prediction
         result = predict_from_features(features, models, raw_url=url)
         trust_score = float(result.get("trust_score", 0))
 
-        # OPTIONAL — Save history if logged in
+        # Save DB history for logged in users
         if user_id:
             try:
                 db = get_db()
                 cursor = db.cursor()
-                cursor.execute(
-                    """
+                cursor.execute("""
                     INSERT INTO scan_results (user_id, shopping_url, trust_score, scanned_at)
                     VALUES (%s, %s, %s, NOW())
-                    """,
-                    (user_id, url, trust_score)
-                )
+                """, (user_id, url, trust_score))
                 cursor.close()
                 db.close()
             except Exception as db_err:
@@ -102,7 +98,7 @@ def predict():
 
 
 # --------------------------------------------------
-# /history (User Past Scans)
+# /history (same style, improved error handling)
 # --------------------------------------------------
 @app.route("/history", methods=["GET"])
 def history():
@@ -114,16 +110,16 @@ def history():
 
         db = get_db()
         cursor = db.cursor(dictionary=True)
-        cursor.execute(
-            """
-            SELECT id, user_id, shopping_url, trust_score, scanned_at
+
+        cursor.execute("""
+            SELECT id, shopping_url, trust_score, scanned_at
             FROM scan_results
             WHERE user_id = %s
             ORDER BY scanned_at DESC
-            """,
-            (user_id,)
-        )
+        """, (user_id,))
+
         rows = cursor.fetchall()
+
         cursor.close()
         db.close()
 
@@ -135,22 +131,23 @@ def history():
 
 
 # --------------------------------------------------
-# Admin: /scan_results
+# /scan_results (admin panel)
 # --------------------------------------------------
 @app.route("/scan_results", methods=["GET"])
 def scan_results():
     try:
         db = get_db()
         cursor = db.cursor(dictionary=True)
-        cursor.execute(
-            """
+
+        cursor.execute("""
             SELECT id, user_id, shopping_url, trust_score, scanned_at
             FROM scan_results
             ORDER BY scanned_at DESC
             LIMIT 200
-            """
-        )
+        """)
+
         rows = cursor.fetchall()
+
         cursor.close()
         db.close()
 
@@ -162,7 +159,7 @@ def scan_results():
 
 
 # --------------------------------------------------
-# Startup
+# Gunicorn / Local Server Start (same style)
 # --------------------------------------------------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
