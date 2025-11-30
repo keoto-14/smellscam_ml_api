@@ -7,24 +7,23 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 import mysql.connector
 
-# Load environment variables
+# Load .env
 load_dotenv()
 
-# ML Imports
+# ML
 from predictor import load_models, predict_from_features
 from url_feature_extractor import extract_all_features
 
 # --------------------------------------------------
-# Flask Init
+# Flask App
 # --------------------------------------------------
 app = Flask(__name__)
 CORS(app)
 
 models = load_models()
 
-
 # --------------------------------------------------
-# DB Helper
+# DB Connection
 # --------------------------------------------------
 def get_db():
     return mysql.connector.connect(
@@ -36,22 +35,8 @@ def get_db():
     )
 
 
-@app.route("/db_test")
-def db_test():
-    try:
-        db = get_db()
-        cursor = db.cursor()
-        cursor.execute("SELECT COUNT(*) FROM scan_results;")
-        count = cursor.fetchone()[0]
-        cursor.close()
-        db.close()
-        return {"db": "connected", "rows": count}
-    except Exception as e:
-        return {"db": "error", "error": str(e)}
-
-
 # --------------------------------------------------
-# Root
+# Root Check
 # --------------------------------------------------
 @app.route("/", methods=["GET"])
 def root():
@@ -59,25 +44,27 @@ def root():
 
 
 # --------------------------------------------------
-# PREDICT API
+# PREDICT ENDPOINT (Exabytes-safe)
 # --------------------------------------------------
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
-        # ----------------------------
-        # JSON FIX (Exabytes safe)
-        # ----------------------------
+        # --------------------------------------
+        # Exabytes Safe JSON Parsing
+        # --------------------------------------
         data = request.get_json(silent=True)
 
         if not data:
-            raw = request.data.decode("utf-8").strip()
             try:
+                raw = request.data.decode("utf-8").strip()
                 data = json.loads(raw)
             except:
-                return jsonify({"error": "Invalid or empty JSON"}), 400
+                return jsonify({"error": "Invalid JSON"}), 400
 
-        # Accept "url" or "target"
-        url = (data.get("url") or data.get("target") or "").strip()
+        # --------------------------------------
+        # ONLY ACCEPT "url" (your PHP uses this)
+        # --------------------------------------
+        url = (data.get("url") or "").strip()
         user_id = data.get("user_id")
 
         if not url:
@@ -85,30 +72,33 @@ def predict():
 
         print("📥 Incoming URL:", url)
 
-        # Extract ML features
+        # Extract features
         features = extract_all_features(url)
 
-        # ML prediction
+        # ML Prediction
         result = predict_from_features(features, models, raw_url=url)
         trust_score = result.get("trust_score", 0)
 
-        # Save into DB (only if logged in)
+        # --------------------------------------
+        # Save to DB (logged in users only)
+        # --------------------------------------
         if user_id:
             try:
                 db = get_db()
-                cursor = db.cursor()
-                cursor.execute(
+                cur = db.cursor()
+                cur.execute(
                     """
                     INSERT INTO scan_results (user_id, shopping_url, trust_score, scanned_at)
                     VALUES (%s, %s, %s, NOW())
                     """,
                     (int(user_id), url, trust_score)
                 )
-                cursor.close()
+                cur.close()
                 db.close()
-            except Exception as db_err:
-                print("[DB ERROR]", db_err)
+            except Exception as e:
+                print("[DB ERROR]", e)
 
+        # Success Response
         return jsonify({
             "url": url,
             "features": features,
@@ -121,7 +111,7 @@ def predict():
 
 
 # --------------------------------------------------
-# User History
+# USER HISTORY
 # --------------------------------------------------
 @app.route("/history", methods=["GET"])
 def history():
@@ -132,9 +122,8 @@ def history():
             return jsonify({"error": "Missing user_id"}), 400
 
         db = get_db()
-        cursor = db.cursor(dictionary=True)
-
-        cursor.execute(
+        cur = db.cursor(dictionary=True)
+        cur.execute(
             """
             SELECT id, shopping_url, trust_score, scanned_at
             FROM scan_results
@@ -143,9 +132,9 @@ def history():
             """,
             (user_id,)
         )
+        rows = cur.fetchall()
 
-        rows = cursor.fetchall()
-        cursor.close()
+        cur.close()
         db.close()
 
         return jsonify({"count": len(rows), "history": rows})
@@ -156,32 +145,32 @@ def history():
 
 
 # --------------------------------------------------
-# Admin — All scans
+# ADMIN — ALL SCANS
 # --------------------------------------------------
 @app.route("/scan_results", methods=["GET"])
 def scan_results():
     try:
         db = get_db()
-        cursor = db.cursor(dictionary=True)
-
-        cursor.execute(
-            "SELECT * FROM scan_results ORDER BY scanned_at DESC LIMIT 200"
+        cur = db.cursor(dictionary=True)
+        cur.execute(
+            "SELECT id, user_id, shopping_url, trust_score, scanned_at FROM scan_results ORDER BY scanned_at DESC LIMIT 200"
         )
+        rows = cur.fetchall()
 
-        rows = cursor.fetchall()
-        cursor.close()
+        cur.close()
         db.close()
 
         return jsonify({"count": len(rows), "results": rows})
+
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
 # --------------------------------------------------
-# Start
+# Run Server
 # --------------------------------------------------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
-    print(f"🚀 SmellScam API running on port {port}")
+    print(f"🚀 SmellScam ML API running on port {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
