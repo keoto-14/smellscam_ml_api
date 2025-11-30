@@ -1,3 +1,4 @@
+# predictor.py
 from __future__ import annotations
 import os
 import pickle
@@ -41,10 +42,6 @@ def cache_set(k: str, v: Any):
     _CACHE[k] = (time.time(), v)
 
 
-
-# ========================================================================
-# MODEL LOADING
-# ========================================================================
 class ModelLoadError(Exception):
     pass
 
@@ -66,7 +63,7 @@ class Predictor:
         self.feature_names = []
         self._loaded = False
 
-        # default weights
+        # defaults (can override via env)
         self.weights = {
             "ml": float(os.getenv("ML_WEIGHT", 0.60)),
             "vt": float(os.getenv("VT_WEIGHT", 0.35)),
@@ -79,7 +76,6 @@ class Predictor:
             for k in self.weights:
                 self.weights[k] = self.weights[k] / s
             logger.info("Normalized weights to sum=1: %s", self.weights)
-
 
     def load_models(self):
         if self._loaded:
@@ -116,11 +112,9 @@ class Predictor:
             logger.exception("Failed loading models")
             raise ModelLoadError(str(e))
 
-
-    # ========================================================================
-    # VIRUSTOTAL / GOOGLE SAFE BROWSING
-    # ========================================================================
+    # ---------------- external VT/GSB checks ----------------
     def vt_domain_report(self, domain: str) -> Tuple[int, int, float]:
+        """Return (total_vendors, malicious_count, ratio). Neutral if FAST_MODE or no API key."""
         if FAST_MODE or not VT_API_KEY:
             return 0, 0, 0.0
 
@@ -140,14 +134,14 @@ class Predictor:
                 ratio = mal / total if total > 0 else 0.0
                 cache_set(key, {"total": total, "mal": mal, "ratio": ratio})
                 return total, mal, ratio
-        except:
-            pass
+        except Exception as e:
+            logger.debug("VT request failed for %s: %s", domain, e)
 
         cache_set(key, {"total": 0, "mal": 0, "ratio": 0.0})
         return 0, 0, 0.0
 
-
     def check_gsb(self, url: str) -> bool:
+        """Return True if GSB flags the url. Fallback False."""
         if FAST_MODE or not GSB_API_KEY:
             return False
 
@@ -162,28 +156,37 @@ class Predictor:
             body = {
                 "client": {"clientId": "smellscam", "clientVersion": "1.0"},
                 "threatInfo": {
-                    "threatTypes": ["MALWARE","UNWANTED_SOFTWARE","SOCIAL_ENGINEERING"],
+                    "threatTypes": ["MALWARE", "SOCIAL_ENGINEERING", "UNWANTED_SOFTWARE"],
                     "platformTypes": ["ANY_PLATFORM"],
                     "threatEntryTypes": ["URL"],
-                    "threatEntries": [{"url": url}]
-                }
+                    "threatEntries": [{"url": url}],
+                },
             }
             r = requests.post(api, json=body, timeout=5)
             r.raise_for_status()
             matches = bool(r.json().get("matches"))
             cache_set(key, matches)
             return matches
-        except:
+        except Exception as e:
+            logger.debug("GSB request failed for %s: %s", url, e)
             cache_set(key, False)
             return False
 
-
-    # ========================================================================
-    # LIVE COMPONENT
-    # ========================================================================
+    # ---------------- live scoring ----------------
     def _live_component(self, feats: dict) -> float:
+        """Normalized [0,1] live score using domain age, traffic, ssl, quad9."""
         if FAST_MODE:
-            return 1.0
+            age = int(feats.get("domain_age_days", 365))
+            traffic = int(feats.get("web_traffic", 100))
+            score = 1.0
+            if age < 30: score *= 0.6
+            elif age < 180: score *= 0.85
+            else: score *= 1.05
+            if traffic >= 1000: score *= 1.15
+            elif traffic >= 500: score *= 1.05
+            elif traffic < 100: score *= 0.9
+            score = max(0.2, min(score, 1.6))
+            return score / 1.6
 
         quad9 = int(feats.get("quad9_blocked", 0))
         ssl = int(feats.get("ssl_valid", 0))
@@ -198,8 +201,10 @@ class Predictor:
             score *= 0.6
         elif age < 180:
             score *= 0.85
-        else:
+        elif age < 1000:
             score *= 1.05
+        else:
+            score *= 1.12
 
         if traffic >= 1000:
             score *= 1.15
@@ -211,58 +216,61 @@ class Predictor:
         score = max(0.05, min(score, 2.5))
         return score / 2.5
 
-
-    # ========================================================================
-    # STABLE RANDOM
-    # ========================================================================
     def stable_random(self, key: str, min_v: int, max_v: int) -> int:
-        base = abs(hash(key or "default")) % 1000000
+        """Deterministic pseudo-random int for stable presentation."""
+        if not key:
+            key = "default"
+        base = abs(hash(key)) % 1000000
         return min_v + (base % (max_v - min_v + 1))
 
-
-    # ========================================================================
-    # MAIN PREDICTOR
-    # ========================================================================
-    def predict_from_features(self, feats: dict, models_obj=None, raw_url: str = None):
+    # ---------------- prediction ----------------
+    def predict_from_features(self, feats: dict, models_obj=None, raw_url: str = None) -> Dict[str, Any]:
         self.load_models()
-
         if raw_url is None:
             raw_url = feats.get("url", "")
 
-        # Build model vector
+        # Build ordered vector
         X_vec = [float(feats.get(f, 0.0)) for f in self.feature_names]
         X_df = pd.DataFrame([X_vec], columns=self.feature_names)
 
-        # ML model outputs
+        # model probabilities (malicious)
         try:
-            p_xgb = float(self.models["xgb"].predict_proba(X_df)[0][1]) if self.models.get("xgb") else 0.5
-        except:
+            p_xgb = float(self.models["xgb"].predict_proba(X_df)[0][1]) if self.models.get("xgb") is not None else 0.5
+        except Exception as e:
+            logger.warning("xgb predict_proba failed: %s", e)
             p_xgb = 0.5
 
         try:
             p_rf = float(self.models["rf"].predict_proba(X_df)[0][1])
-        except:
+        except Exception as e:
+            logger.warning("rf predict_proba failed: %s", e)
             p_rf = 0.5
 
         try:
             meta = np.asarray([[p_xgb, p_rf]])
             p_final = float(self.models["stacker"].predict_proba(meta)[0][1])
-        except:
+        except Exception as e:
+            logger.warning("stacker predict failed: %s — fallback average", e)
             p_final = float((p_xgb + p_rf) / 2.0)
 
-        ml_component = 1.0 - min(max(p_final, 0.0), 1.0)
+        ml_mal_prob = min(max(p_final, 0.0), 1.0)
+        ml_component = 1.0 - ml_mal_prob
 
         parsed = urllib.parse.urlparse(raw_url)
         domain = (parsed.netloc or raw_url).lower().split(":")[0]
         path = parsed.path.lower()
+        query = parsed.query.lower()
 
+        # Use extractor-provided marketplace_type and seller_status
         marketplace_type = int(feats.get("marketplace_type", 0))
         seller_status = int(feats.get("seller_status", 0))
 
+        # HTTP/HTTPS detection (based on raw_url + ssl feature)
         scheme = (parsed.scheme or "http").lower()
         is_https = (scheme == "https")
         is_http_only = (scheme == "http" and int(feats.get("ssl_valid", 0)) == 0)
 
+        # domain features from feats
         domain_age = int(feats.get("domain_age_days", 0))
         ssl_valid = int(feats.get("ssl_valid", 0))
         domain_exists = int(feats.get("domain_exists", 1))
@@ -270,79 +278,101 @@ class Predictor:
         vt_total, vt_mal, vt_ratio = self.vt_domain_report(domain)
         gsb_hit = self.check_gsb(raw_url)
 
-        # VT Component
+        # vt_component: translate VT stats -> component in [0,1] (higher = more trustworthy)
         if vt_total == 0:
             vt_component = 1.0
         elif 0 < vt_total < 5:
+            # less vendors -> slightly reduced confidence
             vt_component = 0.7
         else:
+            # larger vendor set -> trust decreases with malicious ratio
             vt_component = 1.0 - min(max(vt_ratio, 0.0), 1.0)
 
         gsb_component = 0.0 if gsb_hit else 1.0
         live_component = float(self._live_component(feats))
         stable_key = domain or raw_url
 
-
-        # ======================================================================
-        # OVERRIDES
-        # ======================================================================
-
-        # Domain Missing
+        # DOMAIN EXISTENCE override
         if domain_exists == 0:
             score = self.stable_random(stable_key, 1, 10)
+            logger.info("Domain missing override (%s) -> score=%d", domain, score)
             return {
                 "trust_score": score,
                 "label": "PHISHING",
                 "override": "domain_missing",
-                "marketplace_type": marketplace_type,
-                "seller_status": seller_status
+                "model_probs": {"xgb": p_xgb, "rf": p_rf, "ml_final": p_final},
+                "vt": {"total_vendors": vt_total, "malicious": vt_mal, "ratio": vt_ratio},
+                "gsb_match": bool(gsb_hit),
+                "live_component": round(live_component, 4),
+                "domain_exists": domain_exists,
+                "weights": self.weights
             }
 
-        # Google Safe Browsing Hit
+        # GSB override
         if gsb_hit:
+            logger.info("GSB override (url=%s) -> PHISHING", raw_url)
             return {
                 "trust_score": 2,
                 "label": "PHISHING",
                 "override": "gsb",
-                "marketplace_type": marketplace_type,
-                "seller_status": seller_status
+                "model_probs": {"xgb": p_xgb, "rf": p_rf, "ml_final": p_final},
+                "vt": {"total_vendors": vt_total, "malicious": vt_mal, "ratio": vt_ratio},
+                "gsb_match": True,
+                "live_component": round(live_component, 4),
+                "domain_exists": domain_exists,
+                "weights": self.weights
             }
 
-        # VT Severe Malicious
+        # VT severe malicious -> immediate PHISHING
         if vt_mal >= 6:
             score = self.stable_random(stable_key, 1, 49)
+            logger.info("VT severe (%s) mal=%d -> score=%d", domain, vt_mal, score)
             return {
                 "trust_score": score,
                 "label": "PHISHING",
                 "override": "vt_malicious",
-                "marketplace_type": marketplace_type,
-                "seller_status": seller_status
+                "model_probs": {"xgb": p_xgb, "rf": p_rf, "ml_final": p_final},
+                "vt": {"total_vendors": vt_total, "malicious": vt_mal, "ratio": vt_ratio},
+                "gsb_match": False,
+                "live_component": round(live_component, 4),
+                "domain_exists": domain_exists,
+                "weights": self.weights
             }
 
-        # VT Mild Malicious
+        # VT 1..5 malicious -> SUSPICIOUS
         if 1 <= vt_mal <= 5:
             score = self.stable_random(stable_key, 50, 69)
+            logger.info("VT suspicious (%s) mal=%d -> score=%d", domain, vt_mal, score)
             return {
                 "trust_score": score,
                 "label": "SUSPICIOUS",
                 "override": "vt_suspicious",
-                "marketplace_type": marketplace_type,
-                "seller_status": seller_status
+                "model_probs": {"xgb": p_xgb, "rf": p_rf, "ml_final": p_final},
+                "vt": {"total_vendors": vt_total, "malicious": vt_mal, "ratio": vt_ratio},
+                "gsb_match": False,
+                "live_component": round(live_component, 4),
+                "domain_exists": domain_exists,
+                "weights": self.weights
             }
 
-
-        # ======================================================================
-        # VT Clean Path (vt_mal == 0)
-        # ======================================================================
+        # ---------------- VT CLEAN PATH (vt_mal == 0) ----------------
         if vt_mal == 0:
 
-            def choose(low, high):
-                return self.stable_random(stable_key, int(low), int(high))
+            def choose_stable(low:int, high:int) -> int:
+                # Ensure sensible bounds
+                low = max(0, min(100, int(low)))
+                high = max(low, min(100, int(high)))
+                return int(self.stable_random(stable_key, low, high))
 
-
-            # ---------------------------------------------------------
-            # OFFICIAL-LIKE NON-MARKETPLACE WEBSITE
-            # ---------------------------------------------------------
+            # -----------------------------------------------------
+            # OFFICIAL BRAND HEURISTIC (use extractor results + heuristics)
+            # -----------------------------------------------------
+            # We treat "official-like" as:
+            # - not marketplace (marketplace_type==0)
+            # - seller_status == 0 (no marketplace seller)
+            # - domain exists, uses HTTPS & valid SSL
+            # - domain_age >= 365
+            # - domain looks clean (no digits / odd chars)
             is_official_like = (
                 marketplace_type == 0 and
                 seller_status == 0 and
@@ -354,145 +384,182 @@ class Predictor:
             )
 
             if is_official_like:
-                ts = choose(85, 95)
+                # official-like sites should be given a high trust range
+                low, high = 85, 95
+                ts_int = choose_stable(low, high)
+                # small booster to 87 if domain_age >> 365? keep stable_random determinism
                 return {
-                    "trust_score": ts,
+                    "trust_score": ts_int,
                     "label": "LEGITIMATE",
-                    "override": "official_like",
+                    "override": "official_like_domain",
+                    "model_probs": {"xgb": p_xgb, "rf": p_rf, "ml_final": p_final},
+                    "vt": {"total_vendors": vt_total, "malicious": vt_mal, "ratio": vt_ratio},
+                    "live_component": round(live_component, 4),
+                    "domain_age": domain_age,
+                    "ssl_valid": ssl_valid,
                     "marketplace_type": marketplace_type,
                     "seller_status": seller_status
                 }
 
-
-            # ---------------------------------------------------------
-            # MARKETPLACE / SELLER LOGIC (CAP MAX=85)
-            # ---------------------------------------------------------
+            # ------------------------------------------------------
+            # SELLER LOGIC (marketplaces)
+            # Seller entries should never exceed 85 (cap)
+            # ------------------------------------------------------
             if marketplace_type != 0:
-
-                # Shopee / Lazada / Temu
-                if marketplace_type in (1, 2, 3):
-                    if seller_status == 1:
+                # Default ranges for marketplace sellers (respect your earlier rules)
+                if marketplace_type in (1, 2):  # Shopee / Lazada
+                    if seller_status == 1:   # Verified
                         low, high = 80, 85
-                    elif seller_status == 0:
+                    elif seller_status == 0: # Unknown / normal seller
                         low, high = 70, 83
-                    else:
+                    else:                    # Suspicious seller
                         low, high = 60, 75
-
-                # TikTok Shop
-                elif marketplace_type == 4:
+                elif marketplace_type == 3:  # TikTok Shop
                     if seller_status == 1:
                         low, high = 80, 85
                     elif seller_status == 0:
                         low, high = 72, 82
                     else:
                         low, high = 60, 75
-
-                # Facebook Shop
-                elif marketplace_type == 5:
+                elif marketplace_type == 4:  # Facebook Shops / Marketplace
                     if seller_status == 1:
                         low, high = 78, 85
                     elif seller_status == 0:
                         low, high = 68, 80
                     else:
                         low, high = 60, 72
-
                 else:
-                    low, high = 74, 83
+                    # Unknown marketplace fallback
+                    if seller_status == 1:
+                        low, high = 82, 85
+                    elif seller_status == 0:
+                        low, high = 74, 83
+                    else:
+                        low, high = 65, 75
 
-                # HTTP penalty
+                # Apply domain age and HTTP penalty adjustments for sellers
+                # If domain_age < 365 -> lower middle range (user requested rule)
+                if domain_age < 365:
+                    # push the lower bound up to at least 60 and upper slightly lower
+                    low = max(low - 5, 60)
+                    high = min(high, 85)
+
+                # If site is HTTP only / SSL invalid, apply penalty (~ -10)
                 if is_http_only:
-                    low -= 10
-                    high -= 10
-                    low = max(low, 60)
-                    high = max(high, low)
+                    low = max(60, low - 10)
+                    high = max(low, high - 10)
 
-                ts = choose(low, high)
-                ts = min(ts, 85)
+                ts_int = choose_stable(low, high)
 
-                label = "LEGITIMATE" if ts >= 75 else "SUSPICIOUS" if ts >= 50 else "PHISHING"
+                # Ensure sellers never exceed 85 (hard cap)
+                ts_int = min(ts_int, 85)
+
+                label = "LEGITIMATE" if ts_int >= 75 else "SUSPICIOUS" if ts_int >= 50 else "PHISHING"
+                logger.info("Seller mapping (%s) mp=%s seller=%s -> trust=%d label=%s range=(%d,%d)",
+                            domain, marketplace_type, seller_status, ts_int, label, low, high)
 
                 return {
-                    "trust_score": ts,
+                    "trust_score": ts_int,
                     "label": label,
                     "override": "seller_detected",
+                    "model_probs": {"xgb": p_xgb, "rf": p_rf, "ml_final": p_final},
+                    "vt": {"total_vendors": vt_total, "malicious": vt_mal, "ratio": vt_ratio},
+                    "gsb_match": bool(gsb_hit),
+                    "live_component": round(live_component, 4),
+                    "domain_exists": domain_exists,
                     "marketplace_type": marketplace_type,
                     "seller_status": seller_status
                 }
 
-
-            # ---------------------------------------------------------
-            # LOCAL NON-MARKETPLACE WEBSITE
-            # ---------------------------------------------------------
+            # ------------------------------------------------------
+            # LOCAL / NON-MARKETPLACE WEBSITE
+            # domain_age < 365 -> 75..87 (per your request)
+            # domain_age >= 365 -> 85..95
+            # HTTP only -> -10 penalty (min low 60)
+            # ------------------------------------------------------
             if marketplace_type == 0:
-
-                # brand new websites
                 if domain_age < 365:
                     low, high = 75, 87
                 else:
                     low, high = 85, 95
 
                 if is_http_only:
-                    low -= 10
-                    high -= 10
-                    low = max(low, 60)
-                    high = max(high, low)
+                    low = max(60, low - 10)
+                    high = max(low, high - 10)
 
-                ts = choose(low, high)
-                label = "LEGITIMATE" if ts >= 75 else "SUSPICIOUS" if ts >= 50 else "PHISHING"
+                ts_int = choose_stable(low, high)
+
+                label = "LEGITIMATE" if ts_int >= 75 else "SUSPICIOUS" if ts_int >= 50 else "PHISHING"
+                logger.info("Local mapping (%s) age=%d https=%s -> trust=%d label=%s range=(%d,%d)",
+                            domain, domain_age, is_https, ts_int, label, low, high)
 
                 return {
-                    "trust_score": ts,
+                    "trust_score": ts_int,
                     "label": label,
                     "override": "local_store",
-                    "marketplace_type": marketplace_type,
-                    "seller_status": seller_status
+                    "model_probs": {"xgb": p_xgb, "rf": p_rf, "ml_final": p_final},
+                    "vt": {"total_vendors": vt_total, "malicious": vt_mal, "ratio": vt_ratio},
+                    "gsb_match": bool(gsb_hit),
+                    "live_component": round(live_component, 4),
+                    "domain_exists": domain_exists,
+                    "domain_age": domain_age,
+                    "ssl_valid": ssl_valid,
+                    "uses_https": is_https
                 }
 
-
-        # ======================================================================
-        # FALLBACK — weighted combine
-        # ======================================================================
-        w_ml = self.weights["ml"]
-        w_vt = self.weights["vt"]
-        w_gsb = self.weights["gsb"]
+        # ---------------- If none of the VT/GSB overrides fired, fallback to weighted combine ----------------
+        w_ml = self.weights.get("ml", 0.60)
+        w_vt = self.weights.get("vt", 0.35)
+        w_gsb = self.weights.get("gsb", 0.05)
+        leftover = max(0.0, 1.0 - (w_ml + w_vt + w_gsb))
 
         combined = (
             w_ml * ml_component +
             w_vt * vt_component +
             w_gsb * gsb_component +
-            (1 - (w_ml + w_vt + w_gsb)) * live_component
+            leftover * live_component
         )
-
         combined = min(max(combined, 0.0), 1.0)
         trust_score = round(combined * 100.0, 2)
 
-        # fallback seller adjustments
+        # Adjustments based on marketplace features (fallback path)
         if marketplace_type != 0:
             if seller_status == 1:
                 trust_score = max(trust_score, 80)
             elif seller_status == 0:
-                trust_score -= 10
-            else:
-                trust_score -= 20
+                trust_score = max(0.0, trust_score - 10.0)
+            elif seller_status == 2:
+                trust_score = max(0.0, trust_score - 20.0)
 
         trust_score = min(max(trust_score, 0.0), 100.0)
 
-        label = (
-            "PHISHING" if trust_score < 50 else
-            "SUSPICIOUS" if trust_score < 75 else
-            "LEGITIMATE"
-        )
+        if trust_score < 50:
+            label = "PHISHING"
+        elif trust_score < 75:
+            label = "SUSPICIOUS"
+        else:
+            label = "LEGITIMATE"
 
         return {
             "trust_score": trust_score,
             "label": label,
-            "marketplace_type": marketplace_type,
-            "seller_status": seller_status
+            "model_probs": {"xgb": p_xgb, "rf": p_rf, "ml_final": p_final},
+            "vt": {"total_vendors": vt_total, "malicious": vt_mal, "ratio": vt_ratio},
+            "gsb_match": bool(gsb_hit),
+            "seller_status": int(feats.get("seller_status", 0)),
+            "marketplace_type": int(feats.get("marketplace_type", 0)),
+            "domain_exists": int(feats.get("domain_exists", 1)),
+            "live_component": round(live_component, 4),
+            "weights": {"ml": w_ml, "vt": w_vt, "gsb": w_gsb, "leftover": leftover},
+            "breakdown": {
+                "ml_component": round(ml_component, 4),
+                "vt_component": round(vt_component, 4),
+                "gsb_component": round(gsb_component, 4),
+                "live_component": round(live_component, 4)
+            }
         }
 
 
-
-# GLOBAL predictor
 _GLOBAL_PREDICTOR: Predictor | None = None
 
 def load_models():
@@ -501,7 +568,6 @@ def load_models():
         _GLOBAL_PREDICTOR = Predictor()
         _GLOBAL_PREDICTOR.load_models()
     return _GLOBAL_PREDICTOR
-
 
 def predict_from_features(features: dict, models_obj=None, raw_url: str | None = None):
     if hasattr(models_obj, "predict_from_features"):
