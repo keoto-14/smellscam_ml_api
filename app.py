@@ -6,13 +6,12 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 import mysql.connector
 
-# Load environment vars (.env for local, Railway auto loads)
+# Load .env (Railway loads automatically)
 load_dotenv()
 
 # ML imports
 from predictor import load_models, predict_from_features
 from url_feature_extractor import extract_all_features
-
 
 # --------------------------------------------------
 # Flask Init
@@ -20,15 +19,14 @@ from url_feature_extractor import extract_all_features
 app = Flask(__name__)
 CORS(app)
 
-# Load the ML models ONCE only
+# Load ML models once at startup
 models = load_models()
 
-
 # --------------------------------------------------
-# Database Connector
+# MySQL Helper
 # --------------------------------------------------
 def get_db():
-    """Fast & clean MySQL connector."""
+    """Simple clean MySQL connector."""
     return mysql.connector.connect(
         host=os.getenv("DB_HOST"),
         user=os.getenv("DB_USER"),
@@ -39,60 +37,43 @@ def get_db():
 
 
 # --------------------------------------------------
-# Root Route
+# Root
 # --------------------------------------------------
 @app.route("/", methods=["GET"])
 def root():
     return jsonify({
-        "service": "SmellScam ML API",
         "status": "running",
-        "fast_mode": os.getenv("FAST_MODE", "0")
+        "service": "SmellScam ML API",
+        "FAST_MODE": os.getenv("FAST_MODE", "0")
     })
 
 
 # --------------------------------------------------
-# DB test endpoint
-# --------------------------------------------------
-@app.route("/db_test", methods=["GET"])
-def db_test():
-    try:
-        db = get_db()
-        cursor = db.cursor()
-        cursor.execute("SELECT COUNT(*) FROM scan_results;")
-        count = cursor.fetchone()[0]
-        return {"db": "connected", "rows": count}
-    except Exception as e:
-        return {"db": "error", "error": str(e)}
-
-
-# --------------------------------------------------
-# PREDICT ENDPOINT (main API)
+# /predict  (MAIN API)
 # --------------------------------------------------
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
-        # SAFELY parse JSON body
-        data = request.get_json(force=True)
+        # Accept JSON ONLY
+        data = request.get_json(force=True, silent=False)
 
         if not data:
-            return jsonify({"error": "Invalid JSON body"}), 400
+            return jsonify({"error": "Invalid JSON"}), 400
 
-        # PHP result.php sends "url"
         url = (data.get("url") or "").strip()
         user_id = data.get("user_id")
 
-        if url == "":
+        if not url:
             return jsonify({"error": "Missing 'url'"}), 400
 
-        # Extract features safely
+        # Feature Extraction
         features = extract_all_features(url)
 
-        # Predict using ML + rules
+        # ML Prediction
         result = predict_from_features(features, models, raw_url=url)
+        trust_score = float(result.get("trust_score", 0))
 
-        trust_score = result.get("trust_score", 0)
-
-        # Store DB results only if user_id exists
+        # OPTIONAL — Save history if logged in
         if user_id:
             try:
                 db = get_db()
@@ -121,36 +102,32 @@ def predict():
 
 
 # --------------------------------------------------
-# USER HISTORY ENDPOINT
+# /history (User Past Scans)
 # --------------------------------------------------
 @app.route("/history", methods=["GET"])
 def history():
     try:
         user_id = request.args.get("user_id")
+
         if not user_id:
             return jsonify({"error": "Missing user_id"}), 400
 
         db = get_db()
         cursor = db.cursor(dictionary=True)
-
         cursor.execute(
             """
-            SELECT id, shopping_url, trust_score, scanned_at
+            SELECT id, user_id, shopping_url, trust_score, scanned_at
             FROM scan_results
             WHERE user_id = %s
             ORDER BY scanned_at DESC
             """,
             (user_id,)
         )
-
         rows = cursor.fetchall()
         cursor.close()
         db.close()
 
-        return jsonify({
-            "count": len(rows),
-            "history": rows
-        })
+        return jsonify({"count": len(rows), "history": rows})
 
     except Exception as e:
         traceback.print_exc()
@@ -158,14 +135,13 @@ def history():
 
 
 # --------------------------------------------------
-# ADMIN: View last 200 scans
+# Admin: /scan_results
 # --------------------------------------------------
 @app.route("/scan_results", methods=["GET"])
 def scan_results():
     try:
         db = get_db()
         cursor = db.cursor(dictionary=True)
-
         cursor.execute(
             """
             SELECT id, user_id, shopping_url, trust_score, scanned_at
@@ -174,15 +150,11 @@ def scan_results():
             LIMIT 200
             """
         )
-
         rows = cursor.fetchall()
         cursor.close()
         db.close()
 
-        return jsonify({
-            "count": len(rows),
-            "results": rows
-        })
+        return jsonify({"count": len(rows), "results": rows})
 
     except Exception as e:
         traceback.print_exc()
@@ -190,7 +162,7 @@ def scan_results():
 
 
 # --------------------------------------------------
-# START APP (local) — Railway uses gunicorn
+# Startup
 # --------------------------------------------------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
