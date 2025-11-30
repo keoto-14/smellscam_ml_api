@@ -261,11 +261,11 @@ class Predictor:
         path = parsed.path.lower()
         query = parsed.query.lower()
 
-        # Use extractor-provided marketplace_type and seller_status (you requested this)
+        # Use extractor-provided marketplace_type and seller_status
         marketplace_type = int(feats.get("marketplace_type", 0))
         seller_status = int(feats.get("seller_status", 0))
 
-        # NEW: HTTP/HTTPS detection (based on raw_url + ssl feature)
+        # HTTP/HTTPS detection (based on raw_url + ssl feature)
         scheme = (parsed.scheme or "http").lower()
         is_https = (scheme == "https")
         is_http_only = (scheme == "http" and int(feats.get("ssl_valid", 0)) == 0)
@@ -282,15 +282,17 @@ class Predictor:
         if vt_total == 0:
             vt_component = 1.0
         elif 0 < vt_total < 5:
+            # less vendors -> slightly reduced confidence
             vt_component = 0.7
         else:
+            # larger vendor set -> trust decreases with malicious ratio
             vt_component = 1.0 - min(max(vt_ratio, 0.0), 1.0)
 
         gsb_component = 0.0 if gsb_hit else 1.0
         live_component = float(self._live_component(feats))
         stable_key = domain or raw_url
 
-        # DOMAIN EXISTENCE
+        # DOMAIN EXISTENCE override
         if domain_exists == 0:
             score = self.stable_random(stable_key, 1, 10)
             logger.info("Domain missing override (%s) -> score=%d", domain, score)
@@ -367,7 +369,7 @@ class Predictor:
             # -----------------------------------------------------
             # We treat "official-like" as:
             # - not marketplace (marketplace_type==0)
-            # - not a seller page (feats.provided)
+            # - seller_status == 0 (no marketplace seller)
             # - domain exists, uses HTTPS & valid SSL
             # - domain_age >= 365
             # - domain looks clean (no digits / odd chars)
@@ -382,8 +384,10 @@ class Predictor:
             )
 
             if is_official_like:
+                # official-like sites should be given a high trust range
                 low, high = 85, 95
                 ts_int = choose_stable(low, high)
+                # small booster to 87 if domain_age >> 365? keep stable_random determinism
                 return {
                     "trust_score": ts_int,
                     "label": "LEGITIMATE",
@@ -398,26 +402,26 @@ class Predictor:
                 }
 
             # ------------------------------------------------------
-            # SELLER LOGIC (use extractor's marketplace_type & seller_status)
+            # SELLER LOGIC (marketplaces)
             # Seller entries should never exceed 85 (cap)
             # ------------------------------------------------------
-            if marketplace_type != 0 and seller_status is not None:
-                # Use seller_status from features: 0 unknown/normal,1 verified,2 suspicious
-                if marketplace_type in (1, 2, 3):  # Shopee/Lazada/Temu
+            if marketplace_type != 0:
+                # Default ranges for marketplace sellers (respect your earlier rules)
+                if marketplace_type in (1, 2):  # Shopee / Lazada
                     if seller_status == 1:   # Verified
                         low, high = 80, 85
-                    elif seller_status == 0: # Normal / Unknown
+                    elif seller_status == 0: # Unknown / normal seller
                         low, high = 70, 83
                     else:                    # Suspicious seller
                         low, high = 60, 75
-                elif marketplace_type == 4:  # TikTok Shop
+                elif marketplace_type == 3:  # TikTok Shop
                     if seller_status == 1:
                         low, high = 80, 85
                     elif seller_status == 0:
                         low, high = 72, 82
                     else:
                         low, high = 60, 75
-                elif marketplace_type == 5:  # Facebook Shop
+                elif marketplace_type == 4:  # Facebook Shops / Marketplace
                     if seller_status == 1:
                         low, high = 78, 85
                     elif seller_status == 0:
@@ -433,14 +437,21 @@ class Predictor:
                     else:
                         low, high = 65, 75
 
-                # Apply HTTP penalty for seller pages as well
+                # Apply domain age and HTTP penalty adjustments for sellers
+                # If domain_age < 365 -> lower middle range (user requested rule)
+                if domain_age < 365:
+                    # push the lower bound up to at least 60 and upper slightly lower
+                    low = max(low - 5, 60)
+                    high = min(high, 85)
+
+                # If site is HTTP only / SSL invalid, apply penalty (~ -10)
                 if is_http_only:
                     low = max(60, low - 10)
                     high = max(low, high - 10)
 
                 ts_int = choose_stable(low, high)
 
-                # Ensure sellers never exceed 85 (cap)
+                # Ensure sellers never exceed 85 (hard cap)
                 ts_int = min(ts_int, 85)
 
                 label = "LEGITIMATE" if ts_int >= 75 else "SUSPICIOUS" if ts_int >= 50 else "PHISHING"
@@ -461,9 +472,10 @@ class Predictor:
                 }
 
             # ------------------------------------------------------
-            # LOCAL/NON-MARKETPLACE WEBSITE (YOUR UPDATED RULE)
-            # domain_age < 365 -> 75..87
-            # If using HTTP only (no SSL) -> -10 penalty (min low 60)
+            # LOCAL / NON-MARKETPLACE WEBSITE
+            # domain_age < 365 -> 75..87 (per your request)
+            # domain_age >= 365 -> 85..95
+            # HTTP only -> -10 penalty (min low 60)
             # ------------------------------------------------------
             if marketplace_type == 0:
                 if domain_age < 365:
