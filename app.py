@@ -6,10 +6,10 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 import mysql.connector
 
-# Load local env (Railway loads automatically)
+# Load .env (Railway loads automatically)
 load_dotenv()
 
-# ML
+# ML imports
 from predictor import load_models, predict_from_features
 from url_feature_extractor import extract_all_features
 
@@ -19,14 +19,14 @@ from url_feature_extractor import extract_all_features
 app = Flask(__name__)
 CORS(app)
 
-# Load ML models once
+# Load ML models once at startup
 models = load_models()
 
 # --------------------------------------------------
-# DB Helper
+# MySQL Helper
 # --------------------------------------------------
 def get_db():
-    """Fast, clean MySQL connector instance."""
+    """Simple clean MySQL connector."""
     return mysql.connector.connect(
         host=os.getenv("DB_HOST"),
         user=os.getenv("DB_USER"),
@@ -36,66 +36,51 @@ def get_db():
     )
 
 
-@app.route("/db_test")
-def db_test():
-    try:
-        db = get_db()
-        cursor = db.cursor()
-        cursor.execute("SELECT COUNT(*) FROM scan_results;")
-        count = cursor.fetchone()[0]
-        return {"db": "connected", "rows": count}
-    except Exception as e:
-        return {"db": "error", "error": str(e)}
-
-
 # --------------------------------------------------
-# Root Check
+# Root
 # --------------------------------------------------
 @app.route("/", methods=["GET"])
 def root():
     return jsonify({
         "status": "running",
         "service": "SmellScam ML API",
-        "fast_mode": os.getenv("FAST_MODE", "0")
+        "FAST_MODE": os.getenv("FAST_MODE", "0")
     })
 
 
 # --------------------------------------------------
-# /predict  (FULLY FIXED)
+# /predict  (MAIN API)
 # --------------------------------------------------
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
-        # Strict JSON parsing
-        data = request.get_json(force=True)
-        if not data:
-            return jsonify({"error": "Invalid JSON body"}), 400
+        # Accept JSON ONLY
+        data = request.get_json(force=True, silent=False)
 
-        # Accept BOTH "target" (from PHP) and "url" (from ThunderClient)
-        url = (data.get("target") or data.get("url") or "").strip()
+        if not data:
+            return jsonify({"error": "Invalid JSON"}), 400
+
+        url = (data.get("url") or "").strip()
         user_id = data.get("user_id")
 
         if not url:
-            return jsonify({"error": "Missing URL (expected 'target' or 'url')"}), 400
+            return jsonify({"error": "Missing 'url'"}), 400
 
-        print("📥 Incoming URL:", url)
-
-        # Extract features
+        # Feature Extraction
         features = extract_all_features(url)
 
-        # ML prediction
+        # ML Prediction
         result = predict_from_features(features, models, raw_url=url)
-        trust_score = result.get("trust_score", 0)
+        trust_score = float(result.get("trust_score", 0))
 
-        # Save DB history only for logged-in users
+        # OPTIONAL — Save history if logged in
         if user_id:
             try:
                 db = get_db()
                 cursor = db.cursor()
                 cursor.execute(
                     """
-                    INSERT INTO scan_results 
-                        (user_id, shopping_url, trust_score, scanned_at)
+                    INSERT INTO scan_results (user_id, shopping_url, trust_score, scanned_at)
                     VALUES (%s, %s, %s, NOW())
                     """,
                     (user_id, url, trust_score)
@@ -105,9 +90,8 @@ def predict():
             except Exception as db_err:
                 print("[DB ERROR]", db_err)
 
-        # Return JSON result
         return jsonify({
-            "target": url,
+            "url": url,
             "features": features,
             "result": result
         })
@@ -118,28 +102,27 @@ def predict():
 
 
 # --------------------------------------------------
-# /history
+# /history (User Past Scans)
 # --------------------------------------------------
 @app.route("/history", methods=["GET"])
 def history():
     try:
         user_id = request.args.get("user_id")
+
         if not user_id:
             return jsonify({"error": "Missing user_id"}), 400
 
         db = get_db()
         cursor = db.cursor(dictionary=True)
-
         cursor.execute(
             """
-            SELECT id, shopping_url, trust_score, scanned_at
+            SELECT id, user_id, shopping_url, trust_score, scanned_at
             FROM scan_results
             WHERE user_id = %s
             ORDER BY scanned_at DESC
             """,
             (user_id,)
         )
-
         rows = cursor.fetchall()
         cursor.close()
         db.close()
@@ -152,14 +135,13 @@ def history():
 
 
 # --------------------------------------------------
-# /scan_results (admin)
+# Admin: /scan_results
 # --------------------------------------------------
 @app.route("/scan_results", methods=["GET"])
 def scan_results():
     try:
         db = get_db()
         cursor = db.cursor(dictionary=True)
-
         cursor.execute(
             """
             SELECT id, user_id, shopping_url, trust_score, scanned_at
@@ -168,9 +150,7 @@ def scan_results():
             LIMIT 200
             """
         )
-
         rows = cursor.fetchall()
-
         cursor.close()
         db.close()
 
@@ -182,7 +162,7 @@ def scan_results():
 
 
 # --------------------------------------------------
-# Gunicorn / Local
+# Startup
 # --------------------------------------------------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
