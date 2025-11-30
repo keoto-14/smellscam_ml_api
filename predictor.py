@@ -258,6 +258,22 @@ class Predictor:
 
         parsed = urllib.parse.urlparse(raw_url)
         domain = (parsed.netloc or raw_url).lower().split(":")[0]
+        path = parsed.path.lower()
+        query = parsed.query.lower()
+
+        # Use extractor-provided marketplace_type and seller_status (you requested this)
+        marketplace_type = int(feats.get("marketplace_type", 0))
+        seller_status = int(feats.get("seller_status", 0))
+
+        # NEW: HTTP/HTTPS detection (based on raw_url + ssl feature)
+        scheme = (parsed.scheme or "http").lower()
+        is_https = (scheme == "https")
+        is_http_only = (scheme == "http" and int(feats.get("ssl_valid", 0)) == 0)
+
+        # domain features from feats
+        domain_age = int(feats.get("domain_age_days", 0))
+        ssl_valid = int(feats.get("ssl_valid", 0))
+        domain_exists = int(feats.get("domain_exists", 1))
 
         vt_total, vt_mal, vt_ratio = self.vt_domain_report(domain)
         gsb_hit = self.check_gsb(raw_url)
@@ -275,7 +291,6 @@ class Predictor:
         stable_key = domain or raw_url
 
         # DOMAIN EXISTENCE
-        domain_exists = int(feats.get("domain_exists", 1))
         if domain_exists == 0:
             score = self.stable_random(stable_key, 1, 10)
             logger.info("Domain missing override (%s) -> score=%d", domain, score)
@@ -339,10 +354,7 @@ class Predictor:
             }
 
         # ---------------- VT CLEAN PATH (vt_mal == 0) ----------------
-        # Implement requested ranges and special handling for Facebook/TikTok.
         if vt_mal == 0:
-            seller_status = int(feats.get("seller_status", 0))  # 0 unknown/normal,1 verified,2 suspicious
-            marketplace_type = int(feats.get("marketplace_type", 0))  # 0 non-marketplace, 1..n known marketplaces
 
             def choose_stable(low:int, high:int) -> int:
                 # Ensure sensible bounds
@@ -350,69 +362,138 @@ class Predictor:
                 high = max(low, min(100, int(high)))
                 return int(self.stable_random(stable_key, low, high))
 
-            # Default ranges (general marketplaces)
-            if marketplace_type == 0:
-                # Non-marketplace default: 80-90; if domain exists and vt clean, boost upper to 87
-                low, high = 80, 90
-                if domain_exists == 1:
-                    high = min(high, 87)  # booster to cap 87 as requested
-            else:
-                # Per-marketplace default table:
-                # Marketplace codes: 1=Shopee,2=Lazada,3=Temu,4=TikTok,5=Facebook
+            # -----------------------------------------------------
+            # OFFICIAL BRAND HEURISTIC (use extractor results + heuristics)
+            # -----------------------------------------------------
+            # We treat "official-like" as:
+            # - not marketplace (marketplace_type==0)
+            # - not a seller page (feats.provided)
+            # - domain exists, uses HTTPS & valid SSL
+            # - domain_age >= 365
+            # - domain looks clean (no digits / odd chars)
+            is_official_like = (
+                marketplace_type == 0 and
+                seller_status == 0 and
+                domain_exists == 1 and
+                ssl_valid == 1 and
+                is_https and
+                domain_age >= 365 and
+                domain.replace(".", "").isalpha()
+            )
+
+            if is_official_like:
+                low, high = 85, 95
+                ts_int = choose_stable(low, high)
+                return {
+                    "trust_score": ts_int,
+                    "label": "LEGITIMATE",
+                    "override": "official_like_domain",
+                    "model_probs": {"xgb": p_xgb, "rf": p_rf, "ml_final": p_final},
+                    "vt": {"total_vendors": vt_total, "malicious": vt_mal, "ratio": vt_ratio},
+                    "live_component": round(live_component, 4),
+                    "domain_age": domain_age,
+                    "ssl_valid": ssl_valid,
+                    "marketplace_type": marketplace_type,
+                    "seller_status": seller_status
+                }
+
+            # ------------------------------------------------------
+            # SELLER LOGIC (use extractor's marketplace_type & seller_status)
+            # Seller entries should never exceed 85 (cap)
+            # ------------------------------------------------------
+            if marketplace_type != 0 and seller_status is not None:
+                # Use seller_status from features: 0 unknown/normal,1 verified,2 suspicious
                 if marketplace_type in (1, 2, 3):  # Shopee/Lazada/Temu
                     if seller_status == 1:   # Verified
-                        low, high = 95, 100
+                        low, high = 80, 85
                     elif seller_status == 0: # Normal / Unknown
-                        low, high = 85, 95
+                        low, high = 70, 83
                     else:                    # Suspicious seller
-                        low, high = 75, 85
-                elif marketplace_type == 4:  # TikTok Shop — be a bit conservative
+                        low, high = 60, 75
+                elif marketplace_type == 4:  # TikTok Shop
                     if seller_status == 1:
-                        low, high = 90, 95
+                        low, high = 80, 85
                     elif seller_status == 0:
-                        low, high = 82, 88
+                        low, high = 72, 82
                     else:
-                        low, high = 75, 83
-                elif marketplace_type == 5:  # Facebook Shop — more conservative (many untrusted sellers)
+                        low, high = 60, 75
+                elif marketplace_type == 5:  # Facebook Shop
                     if seller_status == 1:
-                        low, high = 85, 92
+                        low, high = 78, 85
                     elif seller_status == 0:
-                        low, high = 75, 85
+                        low, high = 68, 80
                     else:
-                        low, high = 70, 80
+                        low, high = 60, 72
                 else:
                     # Unknown marketplace fallback
                     if seller_status == 1:
-                        low, high = 92, 98
+                        low, high = 82, 85
                     elif seller_status == 0:
-                        low, high = 84, 92
+                        low, high = 74, 83
                     else:
-                        low, high = 75, 85
+                        low, high = 65, 75
 
-            # Finally produce a stable integer trust score within chosen range
-            ts_int = choose_stable(low, high)
+                # Apply HTTP penalty for seller pages as well
+                if is_http_only:
+                    low = max(60, low - 10)
+                    high = max(low, high - 10)
 
-            # Enforce some caps/adjustments: domain_exists still matters
-            if domain_exists == 0:
-                ts_int = min(ts_int, 49)
+                ts_int = choose_stable(low, high)
 
-            label = "LEGITIMATE" if ts_int >= 75 else "SUSPICIOUS" if ts_int >= 50 else "PHISHING"
-            logger.info("VT-clean mapping (%s) mp=%s seller=%s -> trust=%d label=%s range=(%d,%d)",
-                        domain, marketplace_type, seller_status, ts_int, label, low, high)
+                # Ensure sellers never exceed 85 (cap)
+                ts_int = min(ts_int, 85)
 
-            return {
-                "trust_score": ts_int,
-                "label": label,
-                "override": "vt_clean_prefer",
-                "model_probs": {"xgb": p_xgb, "rf": p_rf, "ml_final": p_final},
-                "vt": {"total_vendors": vt_total, "malicious": vt_mal, "ratio": vt_ratio},
-                "gsb_match": False,
-                "seller_status": int(feats.get("seller_status", 0)),
-                "marketplace_type": int(feats.get("marketplace_type", 0)),
-                "domain_exists": domain_exists,
-                "live_component": round(live_component, 4),
-                "weights": {"ml": self.weights.get("ml"), "vt": self.weights.get("vt"), "gsb": self.weights.get("gsb")}
-            }
+                label = "LEGITIMATE" if ts_int >= 75 else "SUSPICIOUS" if ts_int >= 50 else "PHISHING"
+                logger.info("Seller mapping (%s) mp=%s seller=%s -> trust=%d label=%s range=(%d,%d)",
+                            domain, marketplace_type, seller_status, ts_int, label, low, high)
+
+                return {
+                    "trust_score": ts_int,
+                    "label": label,
+                    "override": "seller_detected",
+                    "model_probs": {"xgb": p_xgb, "rf": p_rf, "ml_final": p_final},
+                    "vt": {"total_vendors": vt_total, "malicious": vt_mal, "ratio": vt_ratio},
+                    "gsb_match": bool(gsb_hit),
+                    "live_component": round(live_component, 4),
+                    "domain_exists": domain_exists,
+                    "marketplace_type": marketplace_type,
+                    "seller_status": seller_status
+                }
+
+            # ------------------------------------------------------
+            # LOCAL/NON-MARKETPLACE WEBSITE (YOUR UPDATED RULE)
+            # domain_age < 365 -> 75..87
+            # If using HTTP only (no SSL) -> -10 penalty (min low 60)
+            # ------------------------------------------------------
+            if marketplace_type == 0:
+                if domain_age < 365:
+                    low, high = 75, 87
+                else:
+                    low, high = 85, 95
+
+                if is_http_only:
+                    low = max(60, low - 10)
+                    high = max(low, high - 10)
+
+                ts_int = choose_stable(low, high)
+
+                label = "LEGITIMATE" if ts_int >= 75 else "SUSPICIOUS" if ts_int >= 50 else "PHISHING"
+                logger.info("Local mapping (%s) age=%d https=%s -> trust=%d label=%s range=(%d,%d)",
+                            domain, domain_age, is_https, ts_int, label, low, high)
+
+                return {
+                    "trust_score": ts_int,
+                    "label": label,
+                    "override": "local_store",
+                    "model_probs": {"xgb": p_xgb, "rf": p_rf, "ml_final": p_final},
+                    "vt": {"total_vendors": vt_total, "malicious": vt_mal, "ratio": vt_ratio},
+                    "gsb_match": bool(gsb_hit),
+                    "live_component": round(live_component, 4),
+                    "domain_exists": domain_exists,
+                    "domain_age": domain_age,
+                    "ssl_valid": ssl_valid,
+                    "uses_https": is_https
+                }
 
         # ---------------- If none of the VT/GSB overrides fired, fallback to weighted combine ----------------
         w_ml = self.weights.get("ml", 0.60)
@@ -429,9 +510,7 @@ class Predictor:
         combined = min(max(combined, 0.0), 1.0)
         trust_score = round(combined * 100.0, 2)
 
-        seller_status = int(feats.get("seller_status", 0))
-        marketplace_type = int(feats.get("marketplace_type", 0))
-
+        # Adjustments based on marketplace features (fallback path)
         if marketplace_type != 0:
             if seller_status == 1:
                 trust_score = max(trust_score, 80)
