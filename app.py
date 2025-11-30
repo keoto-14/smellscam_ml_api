@@ -1,18 +1,18 @@
 import os
-import traceback
 import json
+import traceback
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
 import mysql.connector
 
-# Load environment variables
-load_dotenv()
-
-# ML
+# ML imports
 from predictor import load_models, predict_from_features
 from url_feature_extractor import extract_all_features
+
+# Load environment variables
+load_dotenv()
 
 # --------------------------------------------------
 # Flask Init
@@ -20,7 +20,7 @@ from url_feature_extractor import extract_all_features
 app = Flask(__name__)
 CORS(app)
 
-# Load ML models once
+# Load ML models once at startup
 models = load_models()
 
 
@@ -28,7 +28,6 @@ models = load_models()
 # DB Helper
 # --------------------------------------------------
 def get_db():
-    """Return MySQL connection."""
     return mysql.connector.connect(
         host=os.getenv("DB_HOST"),
         user=os.getenv("DB_USER"),
@@ -65,50 +64,45 @@ def root():
 
 
 # --------------------------------------------------
-# /predict — MAIN ML ENDPOINT
+# /predict (Main Endpoint)
 # --------------------------------------------------
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
-        # ------------------------------------------------------
-        # FIXED: Exabytes / Cloudflare Safe JSON Parsing
-        # ------------------------------------------------------
+        # Safe JSON parsing (Exabytes, Cloudflare)
         try:
             data = request.get_json(force=True)
         except:
-            data = None
-
-        if not data:
             try:
-                raw = request.data.decode("utf-8")
-                data = json.loads(raw)
+                raw_data = request.data.decode("utf-8")
+                data = json.loads(raw_data)
             except:
                 return jsonify({"error": "Invalid JSON body"}), 400
 
-        # Accept both keys (PHP uses "target", API tools use "url")
+        if not data:
+            return jsonify({"error": "Missing JSON"}), 400
+
+        # Accept both "target" and "url"
         url = (data.get("url") or data.get("target") or "").strip()
         user_id = data.get("user_id")
 
         if not url:
             return jsonify({"error": "Missing URL"}), 400
 
-        print("📥 Incoming URL:", url)
+        print(f"📥 Received URL: {url}")
 
         # Extract features
         features = extract_all_features(url)
 
-        # ML prediction
+        # Predict ML output
         result = predict_from_features(features, models, raw_url=url)
         trust_score = result.get("trust_score", 0)
 
-        # ------------------------------------------------------
-        # Save scan result ONLY for logged-in users
-        # ------------------------------------------------------
+        # Save result (only for logged-in users)
         if user_id:
             try:
                 db = get_db()
                 cursor = db.cursor()
-
                 cursor.execute(
                     """
                     INSERT INTO scan_results (user_id, shopping_url, trust_score, scanned_at)
@@ -116,13 +110,12 @@ def predict():
                     """,
                     (int(user_id), url, trust_score)
                 )
-
                 cursor.close()
                 db.close()
             except Exception as db_err:
                 print("[DB ERROR]", db_err)
 
-        # Successful response
+        # Success response
         return jsonify({
             "target": url,
             "features": features,
@@ -135,7 +128,7 @@ def predict():
 
 
 # --------------------------------------------------
-# /history — User scan history
+# /history (User Scan History)
 # --------------------------------------------------
 @app.route("/history", methods=["GET"])
 def history():
@@ -169,7 +162,7 @@ def history():
 
 
 # --------------------------------------------------
-# /scan_results — Admin view
+# /scan_results (Admin)
 # --------------------------------------------------
 @app.route("/scan_results", methods=["GET"])
 def scan_results():
@@ -187,7 +180,6 @@ def scan_results():
         )
 
         rows = cursor.fetchall()
-
         cursor.close()
         db.close()
 
