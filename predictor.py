@@ -319,7 +319,7 @@ class Predictor:
         # ---------------- GSB OVERRIDE ----------------
         if gsb_hit:
             return {
-                "trust_score": 2,
+                "trust_score": 10,
                 "label": "PHISHING",
                 "override": "gsb",
                 "model_probs": {"xgb": p_xgb, "rf": p_rf, "ml_final": p_final},
