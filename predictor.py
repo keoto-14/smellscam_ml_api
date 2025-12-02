@@ -476,7 +476,7 @@ class Predictor:
 
         if trust_score < 50:
             label = "PHISHING"
-        elif trust_score < 75:
+        elif trust_score < 78:
             label = "SUSPICIOUS"
         else:
             label = "LEGITIMATE"
