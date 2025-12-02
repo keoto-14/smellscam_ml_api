@@ -400,12 +400,9 @@ class Predictor:
                     low, high = 60, 72
 
             else:
-                if seller_status == 1: 
-                    low, high = 82, 85
-                elif seller_status == 0: 
-                    low, high = 74, 83
-                else: 
-                    low, high = 65, 75
+                if seller_status == 1: low, high = 82, 85
+                elif seller_status == 0: low, high = 74, 83
+                else: low, high = 65, 75
 
             if is_http_only:
                 low = max(60, low - 10)
@@ -426,29 +423,6 @@ class Predictor:
                 "override": "seller_detected",
                 "marketplace_type": marketplace_type,
                 "seller_status": seller_status
-            }
-
-        # ============= NEGATIVE REVIEW RULE (NEW FEATURE) =============
-        neg_reviews = int(feats.get("negative_review_signal", 0))
-        tranco_pop = float(feats.get("tranco_popularity", 50))
-
-        if neg_reviews == 1:
-            base_score = self.stable_random(stable_key, 10, 40)
-            penalty = 15
-            if tranco_pop < 20:
-                penalty = 25
-
-            final_score = max(1, base_score - penalty)
-
-            return {
-                "trust_score": final_score,
-                "label": "PHISHING",
-                "override": "negative_reviews",
-                "neg_review_signal": neg_reviews,
-                "tranco_popularity": tranco_pop,
-                "model_probs": {"xgb": p_xgb, "rf": p_rf, "ml_final": p_final},
-                "vt": {"total_vendors": vt_total, "malicious": vt_mal, "ratio": vt_ratio},
-                "live_component": live_component
             }
 
         # ============= LOCAL WEBSITE (NON-MARKETPLACE) =============
@@ -537,3 +511,4 @@ def predict_from_features(features: dict, models_obj=None, raw_url: str | None =
         return models_obj.predict_from_features(features, raw_url=raw_url)
     pred = load_models()
     return pred.predict_from_features(features, raw_url=raw_url)
+
